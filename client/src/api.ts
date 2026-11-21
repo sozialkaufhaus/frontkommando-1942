@@ -76,6 +76,18 @@ export const api = {
       factionCounts: Record<string, number>;
     }>('/api/world'),
 
+  claimTutorial: (baseId: number) =>
+    request<{ ok: boolean; nextStep: number; rewardLabel: string }>('/api/tutorial/claim', {
+      method: 'POST',
+      body: JSON.stringify({ baseId }),
+    }),
+
+  dismissTutorial: (dismissed = true) =>
+    request<{ ok: boolean }>('/api/tutorial/dismiss', {
+      method: 'POST',
+      body: JSON.stringify({ dismissed }),
+    }),
+
   logout: () =>
     request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
 

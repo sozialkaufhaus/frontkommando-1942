@@ -26,6 +26,7 @@ import {
   PROVINCES,
   type FactionId,
 } from '../shared/worldMap';
+import { TUTORIAL_STEPS } from '../shared/tutorial';
 import type {
   AllianceInfo,
   AllianceMember,
@@ -276,6 +277,52 @@ app.post('/api/auth/logout', authMiddleware, (req: AuthRequest, res) => {
   res.json({ ok: true });
 });
 
+function isTutorialStepSatisfied(
+  step: number,
+  userId: number,
+  activeBase: ReturnType<typeof syncBase>,
+  research: Record<ResearchId, number>,
+  basesCount: number,
+  activeMissions: ReturnType<typeof getActiveMissionsForUser>['active']
+): boolean {
+  if (!activeBase) return false;
+  switch (step) {
+    case 0:
+      return activeBase.buildings.steel_mill >= 4 && activeBase.energyEfficiency >= 1;
+    case 1: {
+      const totalRes = Object.values(research).reduce((a, b) => a + (b || 0), 0);
+      return totalRes >= 3;
+    }
+    case 2: {
+      const totalUnits = Object.values(activeBase.units).reduce((a, b) => a + (b || 0), 0);
+      return totalUnits >= 12;
+    }
+    case 3: {
+      const hasSpyMsg =
+        (
+          db
+            .prepare("SELECT COUNT(*) as c FROM messages WHERE user_id = ? AND type = 'spy'")
+            .get(userId) as { c: number }
+        ).c > 0;
+      const hasSpyMission = activeMissions.some((m) => m.missionType === 'spy');
+      return hasSpyMsg || hasSpyMission;
+    }
+    case 4: {
+      const hasCombatMsg =
+        (
+          db
+            .prepare("SELECT COUNT(*) as c FROM messages WHERE user_id = ? AND type = 'combat'")
+            .get(userId) as { c: number }
+        ).c > 0;
+      return hasCombatMsg;
+    }
+    case 5:
+      return basesCount >= 2;
+    default:
+      return false;
+  }
+}
+
 // ================= GAME STATE =================
 
 app.get('/api/state', authMiddleware, (req: AuthRequest, res) => {
@@ -309,6 +356,7 @@ app.get('/api/state', authMiddleware, (req: AuthRequest, res) => {
   const userRow = db
     .prepare(
       `SELECT u.id, u.username, u.commander_title, u.faction, u.total_points, u.alliance_id,
+              u.tutorial_step, u.tutorial_dismissed,
               a.tag as alliance_tag, a.name as alliance_name
        FROM users u
        LEFT JOIN alliances a ON a.id = u.alliance_id
@@ -321,6 +369,8 @@ app.get('/api/state', authMiddleware, (req: AuthRequest, res) => {
     faction: FactionId;
     total_points: number;
     alliance_id: number | null;
+    tutorial_step: number;
+    tutorial_dismissed: number;
     alliance_tag: string | null;
     alliance_name: string | null;
   };
@@ -341,9 +391,29 @@ app.get('/api/state', authMiddleware, (req: AuthRequest, res) => {
     isHome: b.is_home === 1,
   }));
 
+  const currentStep = userRow.tutorial_step || 0;
+  const completed = currentStep >= TUTORIAL_STEPS.length;
+  const stepReadyToClaim =
+    !completed &&
+    isTutorialStepSatisfied(
+      currentStep,
+      userId,
+      activeBase,
+      research,
+      bases.length,
+      activeMissions
+    );
+
   const payload: GameStateResponse = {
     serverTime: now,
     onlineCount: Math.max(1, getOnlineCount()),
+    tutorial: {
+      currentStep,
+      totalSteps: TUTORIAL_STEPS.length,
+      completed,
+      stepReadyToClaim,
+      dismissed: userRow.tutorial_dismissed === 1,
+    },
     user: {
       id: userRow.id,
       username: userRow.username,
@@ -607,6 +677,90 @@ app.post('/api/bases/:baseId/produce', authMiddleware, (req: AuthRequest, res) =
   ).run(baseId, entityType, entityId, count, unitDurationSec, queueEnd, nextEndsAt);
 
   res.json({ ok: true, unitDurationSec });
+});
+
+// ================= TUTORIAL CAMPAIGN =================
+
+app.post('/api/tutorial/claim', authMiddleware, (req: AuthRequest, res) => {
+  const now = Date.now();
+  processDueMissions(now);
+  const userId = req.userId!;
+  const baseId = Number(req.body?.baseId);
+
+  const user = db
+    .prepare('SELECT tutorial_step FROM users WHERE id = ?')
+    .get(userId) as { tutorial_step: number };
+  const stepIdx = user.tutorial_step || 0;
+
+  if (stepIdx >= TUTORIAL_STEPS.length) {
+    res.status(400).json({ error: 'Einführungsmission bereits abgeschlossen.' });
+    return;
+  }
+
+  const baseRow = db
+    .prepare('SELECT id FROM bases WHERE user_id = ? AND id = ?')
+    .get(userId, baseId) as { id: number } | undefined;
+  const fallbackBase =
+    baseRow ||
+    (db.prepare('SELECT id FROM bases WHERE user_id = ? ORDER BY is_home DESC, id ASC LIMIT 1').get(userId) as {
+      id: number;
+    });
+
+  const activeBase = syncBase(fallbackBase.id, now);
+  const { levels: research } = syncUserResearch(userId, now);
+  const { active: activeMissions } = getActiveMissionsForUser(userId);
+  const basesCount = (
+    db.prepare('SELECT COUNT(*) as c FROM bases WHERE user_id = ?').get(userId) as { c: number }
+  ).c;
+
+  if (
+    !activeBase ||
+    !isTutorialStepSatisfied(stepIdx, userId, activeBase, research, basesCount, activeMissions)
+  ) {
+    res.status(400).json({ error: 'Das Missionsziel ist noch nicht erfüllt.' });
+    return;
+  }
+
+  const def = TUTORIAL_STEPS[stepIdx];
+  const updatedUnits = { ...activeBase.units };
+  if (def.rewardUnits) {
+    for (const [uId, cnt] of Object.entries(def.rewardUnits) as [UnitId, number][]) {
+      if (cnt > 0) updatedUnits[uId] = (updatedUnits[uId] || 0) + cnt;
+    }
+  }
+
+  db.prepare(
+    'UPDATE bases SET steel = steel + ?, munition = munition + ?, fuel = fuel + ?, units_json = ? WHERE id = ?'
+  ).run(
+    def.rewardResources.steel,
+    def.rewardResources.munition,
+    def.rewardResources.fuel,
+    JSON.stringify(updatedUnits),
+    activeBase.id
+  );
+
+  const nextStep = stepIdx + 1;
+  db.prepare('UPDATE users SET tutorial_step = ? WHERE id = ?').run(nextStep, userId);
+  recalculatePoints(userId);
+
+  if (nextStep >= TUTORIAL_STEPS.length) {
+    sendMessage(
+      userId,
+      'system',
+      'OPERATION GRUNDSTEIN ABGESCHLOSSEN!',
+      'Hervorragende Arbeit, Kommandant! Du hast alle 6 Einführungsmissionen gemeistert und dir volle Gefechtsbereitschaft erarbeitet. Erobere nun weitere Schlüsselprovinzen auf der Europa-Karte!',
+      null,
+      now
+    );
+  }
+
+  res.json({ ok: true, nextStep, rewardLabel: def.rewardLabel });
+});
+
+app.post('/api/tutorial/dismiss', authMiddleware, (req: AuthRequest, res) => {
+  const dismissed = req.body?.dismissed === false ? 0 : 1;
+  db.prepare('UPDATE users SET tutorial_dismissed = ? WHERE id = ?').run(dismissed, req.userId!);
+  res.json({ ok: true });
 });
 
 // ================= WORLD MAP & FACTIONS =================

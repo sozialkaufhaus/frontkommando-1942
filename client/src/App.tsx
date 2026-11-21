@@ -12,6 +12,7 @@ import { Overview } from './components/Overview';
 import { Production } from './components/Production';
 import { Research } from './components/Research';
 import { SectorMap } from './components/SectorMap';
+import { TutorialBanner } from './components/TutorialBanner';
 import { WorldMap } from './components/WorldMap';
 
 export default function App() {
@@ -230,6 +231,12 @@ export default function App() {
         }}
         onLogout={handleLogout}
       >
+        <TutorialBanner
+          state={state}
+          onNavigate={setActiveTab}
+          onRefresh={() => fetchState()}
+          onNotify={notify}
+        />
         {activeTab === 'overview' && (
           <Overview
             state={state}

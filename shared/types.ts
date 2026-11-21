@@ -185,9 +185,18 @@ export interface BaseState {
   updatedAt: number;
 }
 
+export interface TutorialState {
+  currentStep: number;
+  totalSteps: number;
+  completed: boolean;
+  stepReadyToClaim: boolean;
+  dismissed: boolean;
+}
+
 export interface GameStateResponse {
   serverTime: number;
   onlineCount: number;
+  tutorial: TutorialState;
   user: {
     id: number;
     username: string;

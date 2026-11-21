@@ -162,4 +162,6 @@ export function initDatabase(): void {
   ensureColumn('users', 'faction', "TEXT NOT NULL DEFAULT 'mitteleuropa'");
   ensureColumn('users', 'alliance_id', 'INTEGER');
   ensureColumn('users', 'last_seen_at', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('users', 'tutorial_step', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('users', 'tutorial_dismissed', 'INTEGER NOT NULL DEFAULT 0');
 }
