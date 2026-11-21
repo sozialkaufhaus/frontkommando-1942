@@ -1,11 +1,13 @@
 import bcrypt from 'bcryptjs';
 import { MAX_SECTORS, POSITIONS_PER_SECTOR } from '../shared/gameData';
+import { PROVINCES, type FactionId } from '../shared/worldMap';
 import type { BuildingId, DefenseId, ResearchId, UnitId } from '../shared/types';
 import { db } from './db';
 import { emptyBuildings, emptyDefenses, emptyResearch, emptyUnits, recalculatePoints } from './engine';
 
 interface AiTemplate {
   username: string;
+  faction: FactionId;
   difficulty: 'Leicht' | 'Mittel' | 'Stark' | 'Festung';
   basePrefix: string;
   sector: number;
@@ -20,11 +22,12 @@ interface AiTemplate {
 }
 
 const AI_BASES: AiTemplate[] = [
-  // Sector 1: Beginner-friendly raid targets & mid-tier depots
+  // Sector 1: Westfront
   {
-    username: 'Garnison Nord',
+    username: 'Garnison Normandie',
+    faction: 'westallianz',
     difficulty: 'Leicht',
-    basePrefix: 'Widerstandsnest Alpha',
+    basePrefix: 'Widerstandsnest Normandie',
     sector: 1,
     position: 3,
     steel: 4200,
@@ -36,9 +39,10 @@ const AI_BASES: AiTemplate[] = [
     defenses: { mg_nest: 2 },
   },
   {
-    username: 'Nachschub-Kolonne',
+    username: 'Nachschub-Kolonne West',
+    faction: 'westallianz',
     difficulty: 'Leicht',
-    basePrefix: 'Felddepot Ost',
+    basePrefix: 'Felddepot Frankreich',
     sector: 1,
     position: 7,
     steel: 6800,
@@ -50,9 +54,10 @@ const AI_BASES: AiTemplate[] = [
     defenses: { mg_nest: 4, pak_gun: 1 },
   },
   {
-    username: 'Panzer-Aufklärer',
+    username: 'Küstenwache Iberien',
+    faction: 'nordpakt',
     difficulty: 'Mittel',
-    basePrefix: 'Stellung Höhenkamm',
+    basePrefix: 'Stellung Iberien',
     sector: 1,
     position: 12,
     steel: 14500,
@@ -64,11 +69,12 @@ const AI_BASES: AiTemplate[] = [
     defenses: { mg_nest: 8, pak_gun: 3 },
   },
 
-  // Sector 2: Medium & Heavy targets
+  // Sector 2: Mitteleuropa
   {
-    username: 'Versorgungsstab II',
+    username: 'Versorgungsstab Mitte',
+    faction: 'mitteleuropa',
     difficulty: 'Leicht',
-    basePrefix: 'Nachschublager Süd',
+    basePrefix: 'Kommando Brandenburg',
     sector: 2,
     position: 4,
     steel: 9500,
@@ -80,9 +86,10 @@ const AI_BASES: AiTemplate[] = [
     defenses: { mg_nest: 5, pak_gun: 2 },
   },
   {
-    username: 'Artillerie-Regiment 14',
+    username: 'Artillerie-Regiment Böhmen',
+    faction: 'mitteleuropa',
     difficulty: 'Mittel',
-    basePrefix: 'Batterie Waldrand',
+    basePrefix: 'Batterie Böhmen',
     sector: 2,
     position: 9,
     steel: 22000,
@@ -94,9 +101,10 @@ const AI_BASES: AiTemplate[] = [
     defenses: { mg_nest: 12, pak_gun: 5, flak_battery: 2 },
   },
   {
-    username: 'Stahl-Brigade',
+    username: 'Stahl-Brigade Weichsel',
+    faction: 'mitteleuropa',
     difficulty: 'Stark',
-    basePrefix: 'Panzer-Vorposten West',
+    basePrefix: 'Panzer-Vorposten Polen',
     sector: 2,
     position: 14,
     steel: 42000,
@@ -108,11 +116,12 @@ const AI_BASES: AiTemplate[] = [
     defenses: { mg_nest: 16, pak_gun: 8, flak_battery: 4, heavy_bunker: 2 },
   },
 
-  // Sector 3: Industrial & Armored Front
+  // Sector 3: Ostfront
   {
-    username: 'Öl-Kommando III',
+    username: 'Garde-Division Ost',
+    faction: 'ostfront',
     difficulty: 'Mittel',
-    basePrefix: 'Raffinerie-Knoten',
+    basePrefix: 'Frontknoten Belarus',
     sector: 3,
     position: 5,
     steel: 19000,
@@ -124,9 +133,10 @@ const AI_BASES: AiTemplate[] = [
     defenses: { mg_nest: 10, pak_gun: 5, flak_battery: 3 },
   },
   {
-    username: 'Geschwader Falke',
+    username: 'Geschwader Steppe',
+    faction: 'ostfront',
     difficulty: 'Stark',
-    basePrefix: 'Fliegerhorst Mitte',
+    basePrefix: 'Fliegerhorst Ukraine',
     sector: 3,
     position: 11,
     steel: 48000,
@@ -138,11 +148,12 @@ const AI_BASES: AiTemplate[] = [
     defenses: { mg_nest: 14, pak_gun: 6, flak_battery: 10, heavy_bunker: 2 },
   },
 
-  // Sector 4 & 5: Endgame Fortresses
+  // Sector 4 & 5: Nordeuropa & Südeuropa
   {
-    username: 'Festungskommando IV',
+    username: 'Nordflotte Schweden',
+    faction: 'nordpakt',
     difficulty: 'Stark',
-    basePrefix: 'Sperrwerk Eisenwall',
+    basePrefix: 'Erz-Festung Schweden',
     sector: 4,
     position: 6,
     steel: 75000,
@@ -154,9 +165,10 @@ const AI_BASES: AiTemplate[] = [
     defenses: { mg_nest: 24, pak_gun: 12, flak_battery: 8, heavy_bunker: 5 },
   },
   {
-    username: 'Zitadelle 1942',
+    username: 'Öl-Zitadelle Karpaten',
+    faction: 'nordpakt',
     difficulty: 'Festung',
-    basePrefix: 'Hauptfestung Adlerhorst',
+    basePrefix: 'Festung Karpaten',
     sector: 5,
     position: 8,
     steel: 140000,
@@ -181,10 +193,10 @@ export function seedAiSectors(): void {
   for (const tpl of AI_BASES) {
     const res = db
       .prepare(
-        `INSERT INTO users (username, password_hash, commander_title, is_ai, ai_difficulty, created_at)
-         VALUES (?, ?, 'KI-Kommando', 1, ?, ?)`
+        `INSERT INTO users (username, password_hash, commander_title, faction, is_ai, ai_difficulty, created_at)
+         VALUES (?, ?, 'KI-Kommando', ?, 1, ?, ?)`
       )
-      .run(tpl.username, aiPasswordHash, tpl.difficulty, now);
+      .run(tpl.username, aiPasswordHash, tpl.faction, tpl.difficulty, now);
     const userId = Number(res.lastInsertRowid);
 
     const research = { ...emptyResearch(), ...tpl.research };
@@ -218,8 +230,38 @@ export function seedAiSectors(): void {
   }
 }
 
-export function findFreeHomeSlot(): { sector: number; position: number } {
-  // Prefer Sector 1 first so new players start near beginner AI bases
+export function findFreeHomeSlot(preferredFaction?: FactionId): {
+  sector: number;
+  position: number;
+  provinceName?: string;
+} {
+  const preferredSector =
+    preferredFaction === 'westallianz'
+      ? 1
+      : preferredFaction === 'mitteleuropa'
+        ? 2
+        : preferredFaction === 'ostfront'
+          ? 3
+          : preferredFaction === 'nordpakt'
+            ? 4
+            : 1;
+
+  // 1. First try a free named Europe province in the preferred theater, then any free Europe province
+  const orderedProvinces = [
+    ...PROVINCES.filter((p) => p.sector === preferredSector),
+    ...PROVINCES.filter((p) => p.sector !== preferredSector),
+  ];
+
+  for (const prov of orderedProvinces) {
+    const taken = db
+      .prepare('SELECT id FROM bases WHERE sector = ? AND position = ?')
+      .get(prov.sector, prov.position);
+    if (!taken) {
+      return { sector: prov.sector, position: prov.position, provinceName: prov.name };
+    }
+  }
+
+  // 2. Fallback: any free slot across all 5 sectors
   for (let s = 1; s <= MAX_SECTORS; s++) {
     const occupied = new Set(
       (

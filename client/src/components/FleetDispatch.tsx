@@ -20,7 +20,7 @@ interface FleetDispatchProps {
   onDispatched: () => void;
 }
 
-const MISSION_TYPES: MissionType[] = ['attack', 'spy', 'transport', 'deploy', 'colonize'];
+const MISSION_TYPES: MissionType[] = ['attack', 'conquer', 'spy', 'transport', 'deploy', 'colonize'];
 
 export function FleetDispatch({
   state,

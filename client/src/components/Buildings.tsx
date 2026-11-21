@@ -206,6 +206,93 @@ export function Buildings({ state, liveResources, nowMs, onRefresh, onNotify }: 
 
   return (
     <div className="space-y-6">
+      {/* Interactive Visual Base Compound Blueprint */}
+      <div className="ops-panel rounded-xl p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="font-display text-base sm:text-lg font-bold text-[#f3ebd8]">
+              Taktischer Stützpunkt-Lageplan — {activeBase.name}
+            </h2>
+            <p className="text-xs text-stone-400">
+              Klicke auf eine Anlage im Geländeplan, um sie direkt auszubauen.
+            </p>
+          </div>
+          <div className="text-xs font-mono-num text-amber-300">
+            Gesamt-Ausbaustufe:{' '}
+            {BUILDING_ORDER.reduce((acc, id) => acc + (activeBase.buildings[id] || 0), 0)}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2.5 p-3 rounded-lg bg-[#0c110e] border border-stone-800 ops-grid-bg">
+          {BUILDING_ORDER.map((id) => {
+            const def = BUILDINGS[id];
+            const lvl = activeBase.buildings[id] || 0;
+            const isUpgrading = activeBase.buildQueue?.buildingId === id;
+            const prereq = checkPrerequisites(def.prereq, activeBase.buildings, research);
+            const cost = getBuildingCost(id, lvl + 1);
+            const canAfford =
+              liveResources.steel >= cost.steel &&
+              liveResources.munition >= cost.munition &&
+              liveResources.fuel >= cost.fuel;
+
+            return (
+              <button
+                key={id}
+                type="button"
+                disabled={!prereq.met || !canAfford || Boolean(activeBase.buildQueue) || busy !== null}
+                onClick={() => handleBuild(id)}
+                title={
+                  isUpgrading
+                    ? `${def.name} wird ausgebaut...`
+                    : !prereq.met
+                      ? `Benötigt: ${prereq.missing.join(', ')}`
+                      : `Klicken für Ausbau auf Stufe ${lvl + 1}`
+                }
+                className={`relative rounded-lg overflow-hidden border text-left transition group ${
+                  isUpgrading
+                    ? 'border-amber-400 ring-1 ring-amber-400/60'
+                    : prereq.met && canAfford && !activeBase.buildQueue
+                      ? 'border-stone-700 hover:border-amber-400 cursor-pointer'
+                      : 'border-stone-800/80 opacity-65 cursor-default'
+                }`}
+              >
+                <div className="h-16 bg-black relative">
+                  <img
+                    src={def.image}
+                    alt={def.name}
+                    className="w-full h-full object-cover opacity-75 group-hover:opacity-100 transition"
+                  />
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent" />
+                  <span
+                    className={`absolute top-1 right-1 px-1.5 py-0.5 rounded font-mono-num text-[10px] font-bold ${
+                      isUpgrading
+                        ? 'bg-amber-500 text-black animate-pulse'
+                        : 'bg-black/80 text-amber-300 border border-amber-500/40'
+                    }`}
+                  >
+                    St.{lvl}
+                  </span>
+                </div>
+                <div className="px-2 py-1.5 bg-[#121714]">
+                  <div className="text-[11px] font-semibold text-[#efe8d8] truncate">
+                    {def.name}
+                  </div>
+                  <div className="text-[9px] text-stone-400 truncate">
+                    {isUpgrading
+                      ? 'Im Ausbau...'
+                      : !prereq.met
+                        ? 'Gesperrt'
+                        : canAfford
+                          ? 'Ausbau bereit'
+                          : 'Rohstoffe fehlen'}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {renderGroup('Rohstoff- & Energiebetriebe', resourceBuildings)}
       {renderGroup('Militär- & Stützpunktanlagen', facilityBuildings)}
     </div>

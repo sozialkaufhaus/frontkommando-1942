@@ -11,7 +11,9 @@ import type {
   Resources,
   SectorSlot,
   UnitId,
+  WorldProvinceState,
 } from '@shared/types';
+import type { FactionId } from '@shared/worldMap';
 
 const TOKEN_KEY = 'fk1942_token';
 
@@ -44,10 +46,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  register: (username: string, password: string) =>
+  register: (username: string, password: string, faction: FactionId = 'mitteleuropa') =>
     request<{ token: string; username: string }>('/api/auth/register', {
       method: 'POST',
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, faction }),
     }),
 
   login: (username: string, password: string) =>
@@ -56,10 +58,23 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
 
-  quickstart: () =>
+  quickstart: (faction: FactionId = 'mitteleuropa') =>
     request<{ token: string; username: string }>('/api/auth/quickstart', {
       method: 'POST',
+      body: JSON.stringify({ faction }),
     }),
+
+  setFaction: (faction: FactionId) =>
+    request<{ ok: boolean; faction: FactionId }>('/api/user/faction', {
+      method: 'POST',
+      body: JSON.stringify({ faction }),
+    }),
+
+  getWorld: () =>
+    request<{
+      provinces: WorldProvinceState[];
+      factionCounts: Record<string, number>;
+    }>('/api/world'),
 
   logout: () =>
     request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
@@ -198,7 +213,8 @@ export function fmtTime(ts: number): string {
 export const MISSION_LABELS: Record<MissionType, string> = {
   spy: 'Aufklären',
   attack: 'Angreifen',
+  conquer: 'Provinz erobern',
   transport: 'Transportieren',
   deploy: 'Stationieren',
-  colonize: 'Einnehmen',
+  colonize: 'Provinz einnehmen',
 };

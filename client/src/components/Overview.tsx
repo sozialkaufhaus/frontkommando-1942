@@ -125,10 +125,10 @@ export function Overview({ state, nowMs, onRefresh, onNavigate, onNotify }: Over
             <div className="flex gap-2">
               <button
                 type="button"
-                onClick={() => onNavigate('sectors')}
+                onClick={() => onNavigate('world')}
                 className="px-3.5 py-2 rounded-lg bg-amber-600/25 hover:bg-amber-600/40 border border-amber-500/50 text-amber-200 text-xs font-semibold uppercase tracking-wider transition cursor-pointer"
               >
-                Sektorenkarte öffnen
+                Europa-Karte öffnen
               </button>
               <button
                 type="button"

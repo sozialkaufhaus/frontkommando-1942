@@ -34,6 +34,7 @@ export function initDatabase(): void {
       username TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       commander_title TEXT NOT NULL DEFAULT 'Oberst',
+      faction TEXT NOT NULL DEFAULT 'mitteleuropa',
       alliance_id INTEGER,
       last_seen_at INTEGER NOT NULL DEFAULT 0,
       is_ai INTEGER NOT NULL DEFAULT 0,
@@ -158,6 +159,7 @@ export function initDatabase(): void {
   `);
 
   // Safe migration for existing databases
+  ensureColumn('users', 'faction', "TEXT NOT NULL DEFAULT 'mitteleuropa'");
   ensureColumn('users', 'alliance_id', 'INTEGER');
   ensureColumn('users', 'last_seen_at', 'INTEGER NOT NULL DEFAULT 0');
 }

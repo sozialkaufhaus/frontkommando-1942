@@ -21,6 +21,11 @@ import {
   getResearchDurationSec,
   getUnitDurationSec,
 } from '../shared/gameData';
+import {
+  FACTIONS,
+  PROVINCES,
+  type FactionId,
+} from '../shared/worldMap';
 import type {
   AllianceInfo,
   AllianceMember,
@@ -37,6 +42,7 @@ import type {
   Resources,
   SectorSlot,
   UnitId,
+  WorldProvinceState,
 } from '../shared/types';
 import { db, initDatabase } from './db';
 import {
@@ -112,23 +118,26 @@ function authMiddleware(req: AuthRequest, res: Response, next: NextFunction): vo
 function createNewCommanderAccount(
   username: string,
   passwordHash: string,
-  isQuickstart: boolean
+  isQuickstart: boolean,
+  faction: FactionId = 'mitteleuropa'
 ): { userId: number; token: string } {
+  const safeFaction: FactionId = faction in FACTIONS ? faction : 'mitteleuropa';
   const now = Date.now();
-  const slot = findFreeHomeSlot();
+  const slot = findFreeHomeSlot(safeFaction);
 
   const res = db
     .prepare(
-      `INSERT INTO users (username, password_hash, commander_title, is_ai, created_at)
-       VALUES (?, ?, ?, 0, ?)`
+      `INSERT INTO users (username, password_hash, commander_title, faction, is_ai, created_at)
+       VALUES (?, ?, ?, ?, 0, ?)`
     )
-    .run(username, passwordHash, isQuickstart ? 'Oberstleutnant' : 'Major', now);
+    .run(username, passwordHash, isQuickstart ? 'Oberstleutnant' : 'Major', safeFaction, now);
   const userId = Number(res.lastInsertRowid);
 
   const research = emptyResearch();
   if (isQuickstart) {
     research.engine_tech = 1;
     research.radio_intel = 1;
+    research.colonization = 1; // Ready to expand to a 2nd province!
   }
   db.prepare('INSERT INTO user_research (user_id, levels_json) VALUES (?, ?)').run(
     userId,
@@ -161,12 +170,14 @@ function createNewCommanderAccount(
     defenses.mg_nest = 2;
   }
 
+  const homeName = slot.provinceName || `Hauptquartier ${slot.sector}-${slot.position}`;
+
   db.prepare(
     `INSERT INTO bases (user_id, name, sector, position, is_home, steel, munition, fuel, buildings_json, units_json, defenses_json, updated_at)
      VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     userId,
-    `Hauptquartier ${slot.sector}-${slot.position}`,
+    homeName,
     slot.sector,
     slot.position,
     isQuickstart ? 4500 : 1800,
@@ -182,8 +193,8 @@ function createNewCommanderAccount(
   sendMessage(
     userId,
     'system',
-    'Willkommen im Hauptquartier — FRONTKOMMANDO 1942',
-    `Kommandant ${username}, dein Stützpunkt wurde auf Sektor [${slot.sector}:${slot.position}] eingerichtet. Baue Stahlwerk, Rüstungsfabrik und Kraftwerk aus, entsende Spähwagen in Sektor ${slot.sector} zur Aufklärung von KI-Stellungen und schlage gezielt zu!`,
+    `Willkommen im Oberkommando — ${FACTIONS[safeFaction].name}`,
+    `Kommandant ${username}, deine Heimatprovinz „${homeName}“ [${slot.sector}:${slot.position}] steht unter deinem Befehl. Öffne die Europa-Karte, baue deinen Stützpunkt aus und erweitere dein Staatsgebiet durch Eroberung oder Einnahme freier Provinzen!`,
     null,
     now
   );
@@ -214,8 +225,9 @@ app.post('/api/auth/register', (req, res) => {
       return;
     }
 
+    const faction = String(req.body?.faction || 'mitteleuropa') as FactionId;
     const hash = bcrypt.hashSync(rawPass, 8);
-    const { token } = createNewCommanderAccount(rawUser, hash, false);
+    const { token } = createNewCommanderAccount(rawUser, hash, false, faction);
     res.json({ token, username: rawUser });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Registrierung fehlgeschlagen.' });
@@ -243,12 +255,13 @@ app.post('/api/auth/login', (req, res) => {
   }
 });
 
-app.post('/api/auth/quickstart', (_req, res) => {
+app.post('/api/auth/quickstart', (req, res) => {
   try {
+    const faction = String(req.body?.faction || 'mitteleuropa') as FactionId;
     const suffix = Math.floor(100 + Math.random() * 900);
     const username = `Kommandant-${suffix}`;
     const hash = bcrypt.hashSync(crypto.randomBytes(12).toString('hex'), 6);
-    const { token } = createNewCommanderAccount(username, hash, true);
+    const { token } = createNewCommanderAccount(username, hash, true, faction);
     res.json({ token, username });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Schnellstart fehlgeschlagen.' });
@@ -295,7 +308,7 @@ app.get('/api/state', authMiddleware, (req: AuthRequest, res) => {
 
   const userRow = db
     .prepare(
-      `SELECT u.id, u.username, u.commander_title, u.total_points, u.alliance_id,
+      `SELECT u.id, u.username, u.commander_title, u.faction, u.total_points, u.alliance_id,
               a.tag as alliance_tag, a.name as alliance_name
        FROM users u
        LEFT JOIN alliances a ON a.id = u.alliance_id
@@ -305,6 +318,7 @@ app.get('/api/state', authMiddleware, (req: AuthRequest, res) => {
     id: number;
     username: string;
     commander_title: string;
+    faction: FactionId;
     total_points: number;
     alliance_id: number | null;
     alliance_tag: string | null;
@@ -334,6 +348,7 @@ app.get('/api/state', authMiddleware, (req: AuthRequest, res) => {
       id: userRow.id,
       username: userRow.username,
       commanderTitle: userRow.commander_title,
+      faction: userRow.faction || 'mitteleuropa',
       points: userRow.total_points,
       unreadMessages: unread,
       allianceId: userRow.alliance_id,
@@ -410,7 +425,14 @@ app.post('/api/bases/:baseId/build', authMiddleware, (req: AuthRequest, res) => 
     return;
   }
 
-  const durationSec = getBuildingDurationSec(buildingId, targetLevel, base.buildings.hq);
+  const uFacRow = db.prepare('SELECT faction FROM users WHERE id = ?').get(req.userId!) as
+    | { faction: FactionId }
+    | undefined;
+  const buildSpeedBonus = FACTIONS[uFacRow?.faction || 'mitteleuropa']?.bonuses.buildSpeed || 0;
+  const durationSec = Math.max(
+    4,
+    Math.floor(getBuildingDurationSec(buildingId, targetLevel, base.buildings.hq) * (1 - buildSpeedBonus))
+  );
   const endsAt = now + durationSec * 1000;
 
   db.prepare('UPDATE bases SET steel = steel - ?, munition = munition - ?, fuel = fuel - ? WHERE id = ?').run(
@@ -587,6 +609,109 @@ app.post('/api/bases/:baseId/produce', authMiddleware, (req: AuthRequest, res) =
   res.json({ ok: true, unitDurationSec });
 });
 
+// ================= WORLD MAP & FACTIONS =================
+
+app.post('/api/user/faction', authMiddleware, (req: AuthRequest, res) => {
+  const faction = String(req.body?.faction || '') as FactionId;
+  if (!(faction in FACTIONS)) {
+    res.status(400).json({ error: 'Unbekannte Fraktion.' });
+    return;
+  }
+  db.prepare('UPDATE users SET faction = ? WHERE id = ?').run(faction, req.userId!);
+  res.json({ ok: true, faction });
+});
+
+app.get('/api/world', authMiddleware, (req: AuthRequest, res) => {
+  const now = Date.now();
+  processDueMissions(now);
+
+  const rows = db
+    .prepare(
+      `SELECT b.id, b.name, b.sector, b.position, b.user_id, b.units_json, b.defenses_json,
+              u.username, u.faction, u.is_ai, u.ai_difficulty, u.total_points,
+              a.tag as alliance_tag
+       FROM bases b
+       JOIN users u ON u.id = b.user_id
+       LEFT JOIN alliances a ON a.id = u.alliance_id`
+    )
+    .all() as Array<{
+    id: number;
+    name: string;
+    sector: number;
+    position: number;
+    user_id: number;
+    units_json: string;
+    defenses_json: string;
+    username: string;
+    faction: FactionId;
+    is_ai: number;
+    ai_difficulty: string | null;
+    total_points: number;
+    alliance_tag: string | null;
+  }>;
+
+  const byCoords = new Map(rows.map((r) => [`${r.sector}:${r.position}`, r]));
+  const factionCounts: Record<string, number> = {
+    mitteleuropa: 0,
+    westallianz: 0,
+    ostfront: 0,
+    nordpakt: 0,
+    neutral: 0,
+  };
+
+  const provinces: WorldProvinceState[] = PROVINCES.map((prov) => {
+    const r = byCoords.get(`${prov.sector}:${prov.position}`);
+    if (!r) {
+      factionCounts.neutral++;
+      return {
+        provinceId: prov.id,
+        sector: prov.sector,
+        position: prov.position,
+        baseId: null,
+        baseName: null,
+        ownerId: null,
+        ownerName: null,
+        ownerFaction: null,
+        allianceTag: null,
+        isAi: false,
+        isOwn: false,
+        isOnline: false,
+        points: 0,
+        defensePower: 0,
+      };
+    }
+
+    const fac = r.faction || 'mitteleuropa';
+    factionCounts[fac] = (factionCounts[fac] || 0) + 1;
+
+    const uMap = JSON.parse(r.units_json) as Record<string, number>;
+    const dMap = JSON.parse(r.defenses_json) as Record<string, number>;
+    const totalDefUnits =
+      Object.values(uMap).reduce((a, b) => a + (b || 0), 0) +
+      Object.values(dMap).reduce((a, b) => a + (b || 0), 0);
+
+    return {
+      provinceId: prov.id,
+      sector: prov.sector,
+      position: prov.position,
+      baseId: r.id,
+      baseName: r.name,
+      ownerId: r.user_id,
+      ownerName: r.username,
+      ownerFaction: fac,
+      allianceTag: r.alliance_tag,
+      isAi: r.is_ai === 1,
+      isOwn: r.user_id === req.userId,
+      isOnline: r.is_ai === 0 && isUserOnline(r.user_id),
+      aiDifficulty: r.ai_difficulty || undefined,
+      points: r.total_points,
+      defensePower: totalDefUnits,
+    };
+  });
+
+  res.json({ provinces, factionCounts });
+});
+
 // ================= SECTORS =================
 
 app.get('/api/sectors/:sector', authMiddleware, (req: AuthRequest, res) => {
@@ -667,7 +792,7 @@ app.post('/api/missions', authMiddleware, (req: AuthRequest, res) => {
   const rawUnits = (req.body?.units || {}) as Partial<Record<UnitId, number>>;
   const rawCargo = (req.body?.cargo || { steel: 0, munition: 0, fuel: 0 }) as Partial<Resources>;
 
-  if (!['spy', 'attack', 'transport', 'deploy', 'colonize'].includes(missionType)) {
+  if (!['spy', 'attack', 'conquer', 'transport', 'deploy', 'colonize'].includes(missionType)) {
     res.status(400).json({ error: 'Ungültiger Missionstyp.' });
     return;
   }

@@ -12,6 +12,7 @@ import { Overview } from './components/Overview';
 import { Production } from './components/Production';
 import { Research } from './components/Research';
 import { SectorMap } from './components/SectorMap';
+import { WorldMap } from './components/WorldMap';
 
 export default function App() {
   const [token, setToken] = useState<string | null>(() => getStoredToken());
@@ -236,6 +237,19 @@ export default function App() {
             onRefresh={() => fetchState()}
             onNavigate={setActiveTab}
             onNotify={notify}
+          />
+        )}
+        {activeTab === 'world' && (
+          <WorldMap
+            state={state}
+            onRefresh={() => fetchState()}
+            onSelectBase={(id) => {
+              setActiveBaseId(id);
+              fetchState(id);
+              setActiveTab('buildings');
+            }}
+            onNotify={notify}
+            onPlanMission={handlePlanMission}
           />
         )}
         {activeTab === 'buildings' && (

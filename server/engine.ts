@@ -26,6 +26,7 @@ import type {
   UnitId,
   UnitQueueItem,
 } from '../shared/types';
+import { FACTIONS, getProvinceByCoords, type FactionId } from '../shared/worldMap';
 import { simulateCombat } from './combat';
 import { db } from './db';
 import { notifyUser } from './realtime';
@@ -167,11 +168,35 @@ export function syncBase(baseId: number, now: number = Date.now()): BaseState | 
       }
     | undefined;
 
+  const ownerRow = db
+    .prepare('SELECT faction FROM users WHERE id = ?')
+    .get(row.user_id) as { faction: FactionId } | undefined;
+  const factionDef = FACTIONS[ownerRow?.faction || 'mitteleuropa'] || FACTIONS.mitteleuropa;
+  const prov = getProvinceByCoords(row.sector, row.position);
+
+  const getEffectiveProduction = (bld: Record<BuildingId, number>) => {
+    const base = getBaseProductionPerHour(bld);
+    const steelMult =
+      1 + factionDef.bonuses.steelProd + (prov?.bonus.type === 'steel' ? prov.bonus.percent / 100 : 0);
+    const munMult =
+      1 + factionDef.bonuses.munitionProd + (prov?.bonus.type === 'munition' ? prov.bonus.percent / 100 : 0);
+    const fuelMult =
+      1 + factionDef.bonuses.fuelProd + (prov?.bonus.type === 'fuel' ? prov.bonus.percent / 100 : 0);
+    return {
+      ...base,
+      production: {
+        steel: Math.floor(base.production.steel * steelMult),
+        munition: Math.floor(base.production.munition * munMult),
+        fuel: Math.floor(base.production.fuel * fuelMult),
+      },
+    };
+  };
+
   const addResourcesUntil = (untilMs: number) => {
     const dtSec = Math.max(0, (untilMs - lastUpdated) / 1000);
     if (dtSec <= 0) return;
     const storage = getBaseStorage(buildings);
-    const { production } = getBaseProductionPerHour(buildings);
+    const { production } = getEffectiveProduction(buildings);
 
     if (steel < storage.steel) {
       steel = Math.min(storage.steel, steel + (production.steel / 3600) * dtSec);
@@ -309,7 +334,7 @@ export function syncBase(baseId: number, now: number = Date.now()): BaseState | 
     nextEndsAt: q.next_ends_at,
   }));
 
-  const prod = getBaseProductionPerHour(buildings);
+  const prod = getEffectiveProduction(buildings);
   const storage = getBaseStorage(buildings);
 
   return {
@@ -733,10 +758,21 @@ function resolveOutboundMission(m: MissionRow, now: number): void {
     return;
   }
 
-  // --- ATTACK (Angreifen) ---
-  if (m.mission_type === 'attack') {
+  // --- ATTACK or CONQUER (Angreifen / Provinz erobern) ---
+  if (m.mission_type === 'attack' || m.mission_type === 'conquer') {
     const atkRes = getUserResearch(m.user_id);
     const defRes = getUserResearch(targetRow.user_id);
+    const atkUser = db
+      .prepare('SELECT faction FROM users WHERE id = ?')
+      .get(m.user_id) as { faction: FactionId } | undefined;
+    const defUser = db
+      .prepare('SELECT faction FROM users WHERE id = ?')
+      .get(targetRow.user_id) as { faction: FactionId } | undefined;
+
+    const atkFac = FACTIONS[atkUser?.faction || 'mitteleuropa'] || FACTIONS.mitteleuropa;
+    const defFac = FACTIONS[defUser?.faction || 'mitteleuropa'] || FACTIONS.mitteleuropa;
+    const targetProv = getProvinceByCoords(m.target_sector, m.target_position);
+    const provDefBonus = targetProv?.bonus.type === 'defense' ? targetProv.bonus.percent / 10 : 0;
 
     const sim = simulateCombat({
       attackerName: senderName,
@@ -745,25 +781,16 @@ function resolveOutboundMission(m: MissionRow, now: number): void {
       attackerUnits: units,
       defenderUnits: targetState.units,
       defenderDefenses: targetState.defenses,
-      attackerTech: { weapons: atkRes.weapons_tech, armor: atkRes.armor_tech },
-      defenderTech: { weapons: defRes.weapons_tech, armor: defRes.armor_tech },
+      attackerTech: {
+        weapons: atkRes.weapons_tech + Math.round(atkFac.bonuses.attack * 10),
+        armor: atkRes.armor_tech + Math.round(atkFac.bonuses.armor * 10),
+      },
+      defenderTech: {
+        weapons: defRes.weapons_tech + Math.round((defFac.bonuses.defense + defFac.bonuses.attack) * 5),
+        armor: defRes.armor_tech + Math.round((defFac.bonuses.armor + defFac.bonuses.defense) * 10 + provDefBonus),
+      },
       defenderResources: targetState.resources,
     });
-
-    // Update defender base (deduct loot, update surviving units & rebuilt defenses)
-    const defUnitsFull = { ...emptyUnits(), ...sim.defenderSurvivingUnits };
-    const defDefsFull = { ...emptyDefenses(), ...sim.defenderFinalDefenses };
-
-    db.prepare(
-      'UPDATE bases SET steel = MAX(0, steel - ?), munition = MAX(0, munition - ?), fuel = MAX(0, fuel - ?), units_json = ?, defenses_json = ? WHERE id = ?'
-    ).run(
-      sim.report.loot.steel,
-      sim.report.loot.munition,
-      sim.report.loot.fuel,
-      JSON.stringify(defUnitsFull),
-      JSON.stringify(defDefsFull),
-      targetRow.id
-    );
 
     const outcomeLabel =
       sim.report.outcome === 'attacker_win'
@@ -772,43 +799,122 @@ function resolveOutboundMission(m: MissionRow, now: number): void {
           ? 'NIEDERLAGE'
           : 'UNENTSCHIEDEN';
 
-    sendMessage(
-      m.user_id,
-      'combat',
-      `Kampfbericht [${outcomeLabel}]: ${targetState.name} ${coords}`,
-      `Gefecht über ${sim.report.rounds.length} Runde(n) bei ${targetState.name} ${coords}. Beute: ${sim.report.loot.steel.toLocaleString('de-DE')} Stahl, ${sim.report.loot.munition.toLocaleString('de-DE')} Munition, ${sim.report.loot.fuel.toLocaleString('de-DE')} Treibstoff.`,
-      sim.report,
-      m.arrives_at
-    );
+    // Check if territorial conquest succeeds!
+    let conquered = false;
+    if (m.mission_type === 'conquer' && sim.report.outcome === 'attacker_win') {
+      const maxBases = getMaxBases(atkRes.colonization);
+      const attackerBasesCount = (
+        db.prepare('SELECT COUNT(*) as c FROM bases WHERE user_id = ?').get(m.user_id) as { c: number }
+      ).c;
+      const defenderBasesCount = (
+        db.prepare('SELECT COUNT(*) as c FROM bases WHERE user_id = ?').get(targetRow.user_id) as { c: number }
+      ).c;
+      const canAnnex =
+        attackerBasesCount < maxBases &&
+        (targetOwner.is_ai === 1 || defenderBasesCount > 1);
 
-    if (!targetOwner.is_ai && targetRow.user_id !== m.user_id) {
+      if (canAnnex) {
+        conquered = true;
+        const garrisonUnits = { ...emptyUnits(), ...sim.attackerSurvivingUnits };
+        const provLabel = targetProv ? targetProv.name : targetState.name;
+        db.prepare(
+          `UPDATE bases
+           SET user_id = ?, name = ?, is_home = 0,
+               steel = steel + ?, munition = munition + ?, fuel = fuel + ?,
+               units_json = ?, defenses_json = ?
+           WHERE id = ?`
+        ).run(
+          m.user_id,
+          provLabel,
+          cargo.steel,
+          cargo.munition,
+          cargo.fuel,
+          JSON.stringify(garrisonUnits),
+          JSON.stringify(emptyDefenses()),
+          targetRow.id
+        );
+        db.prepare('DELETE FROM missions WHERE id = ?').run(m.id);
+
+        sendMessage(
+          m.user_id,
+          'combat',
+          `PROVINZ EROBERT: ${provLabel} ${coords}`,
+          `Sieg über ${targetOwner.username}! Deine Truppen haben ${provLabel} ${coords} eingenommen und unter deine Kontrolle gestellt.`,
+          sim.report,
+          m.arrives_at
+        );
+        if (!targetOwner.is_ai && targetRow.user_id !== m.user_id) {
+          sendMessage(
+            targetRow.user_id,
+            'combat',
+            `PROVINZ VERLOREN: ${provLabel} ${coords}`,
+            `${senderName} hat deine Provinz ${provLabel} ${coords} erobert!`,
+            sim.report,
+            m.arrives_at
+          );
+        }
+      }
+    }
+
+    if (!conquered) {
+      // Standard battle result: deduct loot, update surviving units & rebuilt defenses
+      const defUnitsFull = { ...emptyUnits(), ...sim.defenderSurvivingUnits };
+      const defDefsFull = { ...emptyDefenses(), ...sim.defenderFinalDefenses };
+
+      db.prepare(
+        'UPDATE bases SET steel = MAX(0, steel - ?), munition = MAX(0, munition - ?), fuel = MAX(0, fuel - ?), units_json = ?, defenses_json = ? WHERE id = ?'
+      ).run(
+        sim.report.loot.steel,
+        sim.report.loot.munition,
+        sim.report.loot.fuel,
+        JSON.stringify(defUnitsFull),
+        JSON.stringify(defDefsFull),
+        targetRow.id
+      );
+
+      const extraNote =
+        m.mission_type === 'conquer' && sim.report.outcome === 'attacker_win'
+          ? ' (Eroberung nicht möglich: Stützpunkt-Limit erreicht oder letzte Heimatbasis des Gegners — Beute wurde gesichert.)'
+          : '';
+
       sendMessage(
-        targetRow.user_id,
+        m.user_id,
         'combat',
-        `Angriff auf ${targetState.name} ${coords} (${outcomeLabel})`,
-        `${senderName} hat deinen Stützpunkt ${targetState.name} ${coords} angegriffen.`,
+        `Kampfbericht [${outcomeLabel}]: ${targetState.name} ${coords}`,
+        `Gefecht über ${sim.report.rounds.length} Runde(n) bei ${targetState.name} ${coords}. Beute: ${sim.report.loot.steel.toLocaleString('de-DE')} Stahl, ${sim.report.loot.munition.toLocaleString('de-DE')} Munition, ${sim.report.loot.fuel.toLocaleString('de-DE')} Treibstoff.${extraNote}`,
         sim.report,
         m.arrives_at
       );
-    }
 
-    const totalSurvivors = Object.values(sim.attackerSurvivingUnits).reduce((a, b) => a + (b || 0), 0);
-    if (totalSurvivors > 0) {
-      const returnCargo: Resources = {
-        steel: cargo.steel + sim.report.loot.steel,
-        munition: cargo.munition + sim.report.loot.munition,
-        fuel: cargo.fuel + sim.report.loot.fuel,
-      };
-      db.prepare(
-        "UPDATE missions SET status = 'returning', units_json = ?, cargo_json = ?, returns_at = ? WHERE id = ?"
-      ).run(
-        JSON.stringify(sim.attackerSurvivingUnits),
-        JSON.stringify(returnCargo),
-        m.arrives_at + travelDuration,
-        m.id
-      );
-    } else {
-      db.prepare('DELETE FROM missions WHERE id = ?').run(m.id);
+      if (!targetOwner.is_ai && targetRow.user_id !== m.user_id) {
+        sendMessage(
+          targetRow.user_id,
+          'combat',
+          `Angriff auf ${targetState.name} ${coords} (${outcomeLabel})`,
+          `${senderName} hat deinen Stützpunkt ${targetState.name} ${coords} angegriffen.`,
+          sim.report,
+          m.arrives_at
+        );
+      }
+
+      const totalSurvivors = Object.values(sim.attackerSurvivingUnits).reduce((a, b) => a + (b || 0), 0);
+      if (totalSurvivors > 0) {
+        const returnCargo: Resources = {
+          steel: cargo.steel + sim.report.loot.steel,
+          munition: cargo.munition + sim.report.loot.munition,
+          fuel: cargo.fuel + sim.report.loot.fuel,
+        };
+        db.prepare(
+          "UPDATE missions SET status = 'returning', units_json = ?, cargo_json = ?, returns_at = ? WHERE id = ?"
+        ).run(
+          JSON.stringify(sim.attackerSurvivingUnits),
+          JSON.stringify(returnCargo),
+          m.arrives_at + travelDuration,
+          m.id
+        );
+      } else {
+        db.prepare('DELETE FROM missions WHERE id = ?').run(m.id);
+      }
     }
 
     recalculatePoints(m.user_id);

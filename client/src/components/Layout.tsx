@@ -6,6 +6,7 @@ import {
   Crosshair,
   FlaskConical,
   Fuel,
+  Globe2,
   Hammer,
   LogOut,
   Mail,
@@ -14,11 +15,13 @@ import {
   Shield,
   Zap,
 } from 'lucide-react';
+import { FACTIONS } from '@shared/worldMap';
 import type { GameStateResponse, Resources } from '@shared/types';
 import { fmtNum } from '../api';
 
 export type NavTab =
   | 'overview'
+  | 'world'
   | 'buildings'
   | 'research'
   | 'units'
@@ -41,11 +44,12 @@ interface LayoutProps {
 
 const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: 'overview', label: 'Lage-Übersicht', icon: Activity },
+  { id: 'world', label: 'Europa-Karte', icon: Globe2 },
   { id: 'buildings', label: 'Stützpunkt-Ausbau', icon: Building2 },
   { id: 'research', label: 'Forschung', icon: FlaskConical },
   { id: 'units', label: 'Einheiten', icon: Crosshair },
   { id: 'defense', label: 'Verteidigung', icon: Shield },
-  { id: 'sectors', label: 'Sektorenkarte', icon: MapIcon },
+  { id: 'sectors', label: 'Sektoren-Liste', icon: MapIcon },
   { id: 'fleet', label: 'Marschbefehl', icon: Compass },
   { id: 'diplomacy', label: 'Allianz & Funk', icon: Radio },
   { id: 'messages', label: 'Nachrichten', icon: Mail },
@@ -95,6 +99,13 @@ export function Layout({
                     <span className="text-emerald-400 mr-1">[{user.allianceTag}]</span>
                   )}
                   {user.username}
+                </span>
+                <span>•</span>
+                <span
+                  className="font-semibold"
+                  style={{ color: FACTIONS[user.faction]?.color || '#fbbf24' }}
+                >
+                  {FACTIONS[user.faction]?.shortName || 'Mitteleuropa'}
                 </span>
                 <span>•</span>
                 <span className="font-mono-num">{fmtNum(user.points)} Pkt</span>

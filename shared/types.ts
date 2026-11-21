@@ -1,3 +1,5 @@
+import type { FactionId } from './worldMap';
+
 export type ResourceType = 'steel' | 'munition' | 'fuel';
 
 export interface Resources {
@@ -45,7 +47,7 @@ export type DefenseId =
 
 export type CombatEntityId = UnitId | DefenseId;
 
-export type MissionType = 'spy' | 'attack' | 'transport' | 'deploy' | 'colonize';
+export type MissionType = 'spy' | 'attack' | 'conquer' | 'transport' | 'deploy' | 'colonize';
 
 export interface Prerequisite {
   building?: Partial<Record<BuildingId, number>>;
@@ -190,6 +192,7 @@ export interface GameStateResponse {
     id: number;
     username: string;
     commanderTitle: string;
+    faction: FactionId;
     points: number;
     unreadMessages: number;
     allianceId: number | null;
@@ -202,6 +205,24 @@ export interface GameStateResponse {
   researchQueue: ResearchQueueItem | null;
   activeMissions: FleetMission[];
   incomingMissions: FleetMission[];
+}
+
+export interface WorldProvinceState {
+  provinceId: string;
+  sector: number;
+  position: number;
+  baseId: number | null;
+  baseName: string | null;
+  ownerId: number | null;
+  ownerName: string | null;
+  ownerFaction: FactionId | null;
+  allianceTag: string | null;
+  isAi: boolean;
+  isOwn: boolean;
+  isOnline: boolean;
+  aiDifficulty?: string;
+  points: number;
+  defensePower: number;
 }
 
 export interface SectorSlot {

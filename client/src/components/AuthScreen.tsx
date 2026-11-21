@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Crosshair, KeyRound, Shield, UserPlus, Zap } from 'lucide-react';
+import { FACTIONS, FACTION_ORDER, type FactionId } from '@shared/worldMap';
 import { api, setStoredToken } from '../api';
 
 interface AuthScreenProps {
@@ -8,6 +9,7 @@ interface AuthScreenProps {
 
 export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [faction, setFaction] = useState<FactionId>('mitteleuropa');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -21,7 +23,7 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
       const res =
         mode === 'login'
           ? await api.login(username, password)
-          : await api.register(username, password);
+          : await api.register(username, password, faction);
       setStoredToken(res.token);
       onAuthenticated();
     } catch (err) {
@@ -35,7 +37,7 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     setError(null);
     setLoading(true);
     try {
-      const res = await api.quickstart();
+      const res = await api.quickstart(faction);
       setStoredToken(res.token);
       onAuthenticated();
     } catch (err) {
@@ -100,7 +102,42 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             </div>
           </div>
 
-          <div className="mt-6 pt-5 border-t border-stone-700/60">
+          <div className="mt-5 pt-4 border-t border-stone-700/60 space-y-3">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.2em] text-amber-400 font-semibold mb-2">
+                Fraktion wählen (für Schnellstart &amp; Registrierung)
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {FACTION_ORDER.map((fId) => {
+                  const f = FACTIONS[fId];
+                  const selected = faction === fId;
+                  return (
+                    <button
+                      key={fId}
+                      type="button"
+                      onClick={() => setFaction(fId)}
+                      className={`p-2 rounded-lg border text-left transition cursor-pointer ${
+                        selected
+                          ? `${f.bgClass} ring-1 ring-amber-400/70`
+                          : 'bg-black/45 border-stone-800 hover:border-stone-600'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1">
+                        <span className={`text-xs font-bold ${f.textClass}`}>{f.shortName}</span>
+                        <span
+                          className="w-2 h-2 rounded-full"
+                          style={{ backgroundColor: f.color }}
+                        />
+                      </div>
+                      <div className="text-[10px] text-stone-400 truncate mt-0.5">
+                        {f.bonusSummary[0]}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             <button
               type="button"
               onClick={handleQuickstart}
@@ -108,10 +145,10 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
               className="w-full py-3.5 px-5 rounded-lg bg-gradient-to-r from-amber-600 via-amber-500 to-amber-600 hover:from-amber-500 hover:to-amber-500 text-[#12100b] font-bold tracking-wide text-sm uppercase shadow-lg shadow-amber-900/30 transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
             >
               <Zap className="w-4 h-4 fill-current" />
-              Sofort losspielen (Schnellstart-Kommandant)
+              Sofort losspielen ({FACTIONS[faction].shortName})
             </button>
-            <p className="text-[11px] text-[#9b9587] text-center mt-2">
-              Startet sofort mit ausgebauter Basis, Start-Rohstoffen, Spähwagen &amp; Infanterie-Verband.
+            <p className="text-[11px] text-[#9b9587] text-center">
+              Startet sofort mit Heimatprovinz, Start-Rohstoffen, Spähwagen &amp; Infanterie-Verband.
             </p>
           </div>
         </div>
