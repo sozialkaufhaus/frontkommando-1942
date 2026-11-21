@@ -35,13 +35,18 @@ import type {
   ChatMessage,
   CombatEntityId,
   DefenseId,
+  DiplomaticPact,
   GameMessage,
   GameStateResponse,
   HighscoreEntry,
   MissionType,
+  PactType,
+  PlayerListItem,
   ResearchId,
+  ResourceType,
   Resources,
   SectorSlot,
+  TradeOffer,
   UnitId,
   WorldProvinceState,
 } from '../shared/types';
@@ -275,6 +280,92 @@ app.post('/api/auth/logout', authMiddleware, (req: AuthRequest, res) => {
     db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
   }
   res.json({ ok: true });
+});
+
+// ================= GOOGLE OAUTH SIGN-IN =================
+
+const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || '').trim();
+
+app.get('/api/auth/providers', (_req, res) => {
+  res.json({
+    googleEnabled: Boolean(GOOGLE_CLIENT_ID),
+    googleClientId: GOOGLE_CLIENT_ID || null,
+  });
+});
+
+app.post('/api/auth/google', async (req, res) => {
+  try {
+    if (!GOOGLE_CLIENT_ID) {
+      res.status(503).json({
+        error:
+          'Google-Anmeldung ist auf diesem Server noch nicht konfiguriert (Umgebungsvariable GOOGLE_CLIENT_ID fehlt).',
+      });
+      return;
+    }
+
+    const credential = String(req.body?.credential || '').trim();
+    const faction = String(req.body?.faction || 'mitteleuropa') as FactionId;
+    if (!credential) {
+      res.status(400).json({ error: 'Kein Google-Token übermittelt.' });
+      return;
+    }
+
+    const verifyRes = await fetch(
+      `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`
+    );
+    if (!verifyRes.ok) {
+      res.status(401).json({ error: 'Ungültiges oder abgelaufenes Google-Token.' });
+      return;
+    }
+
+    const payload = (await verifyRes.json()) as {
+      sub?: string;
+      aud?: string;
+      email?: string;
+      name?: string;
+      given_name?: string;
+    };
+
+    if (!payload.sub || payload.aud !== GOOGLE_CLIENT_ID) {
+      res.status(401).json({ error: 'Google-Token stimmt nicht mit der Client-ID überein.' });
+      return;
+    }
+
+    const existing = db
+      .prepare('SELECT id, username FROM users WHERE google_sub = ?')
+      .get(payload.sub) as { id: number; username: string } | undefined;
+
+    if (existing) {
+      const token = createSession(existing.id);
+      res.json({ token, username: existing.username, isNew: false });
+      return;
+    }
+
+    // Create unique commander name from Google profile
+    const rawBase = (payload.given_name || payload.name || payload.email?.split('@')[0] || 'Kommandant')
+      .replace(/[^a-zA-Z0-9_-]/g, '')
+      .slice(0, 16) || 'Kommandant';
+    let candidate = rawBase;
+    let attempt = 0;
+    while (db.prepare('SELECT id FROM users WHERE LOWER(username) = LOWER(?)').get(candidate)) {
+      attempt++;
+      candidate = `${rawBase}_${Math.floor(10 + Math.random() * 89 + attempt)}`;
+    }
+
+    const randomHash = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), 6);
+    const { userId, token } = createNewCommanderAccount(candidate, randomHash, false, faction);
+    db.prepare('UPDATE users SET google_sub = ?, email = ? WHERE id = ?').run(
+      payload.sub,
+      payload.email || null,
+      userId
+    );
+
+    res.json({ token, username: candidate, isNew: true });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Google-Anmeldung fehlgeschlagen.',
+    });
+  }
 });
 
 function isTutorialStepSatisfied(
@@ -1037,6 +1128,31 @@ app.post('/api/missions', authMiddleware, (req: AuthRequest, res) => {
     }
   }
 
+  // Enforce active NAP / Military Alliance protection
+  if (missionType === 'attack' || missionType === 'conquer') {
+    const targetOwnerRow = db
+      .prepare('SELECT b.user_id, u.username FROM bases b JOIN users u ON u.id = b.user_id WHERE b.sector = ? AND b.position = ?')
+      .get(targetSector, targetPosition) as { user_id: number; username: string } | undefined;
+    if (targetOwnerRow && targetOwnerRow.user_id !== req.userId) {
+      const activePact = db
+        .prepare(
+          `SELECT pact_type FROM diplomatic_pacts
+           WHERE status = 'active'
+             AND ((requester_id = ? AND target_id = ?) OR (requester_id = ? AND target_id = ?))`
+        )
+        .get(req.userId!, targetOwnerRow.user_id, targetOwnerRow.user_id, req.userId!) as
+        | { pact_type: PactType }
+        | undefined;
+      if (activePact) {
+        const label = activePact.pact_type === 'military_alliance' ? 'Militärbündnis' : 'Nichtangriffspakt';
+        res.status(409).json({
+          error: `Angriff blockiert: Du hast ein aktives ${label} mit ${targetOwnerRow.username}. Kündige den Vertrag zuerst unter „Spieler & Handel“.`,
+        });
+        return;
+      }
+    }
+  }
+
   const travel = getFleetTravelStats(
     unitsToSend,
     base.sector,
@@ -1491,6 +1607,403 @@ app.post('/api/alliances/leave', authMiddleware, (req: AuthRequest, res) => {
   if (remaining === 0) {
     db.prepare('DELETE FROM alliances WHERE id = ?').run(oldId);
   }
+  res.json({ ok: true });
+});
+
+// ================= PLAYERS, PACTS & TRADE MARKET =================
+
+const RESOURCE_NAMES: Record<ResourceType, string> = {
+  steel: 'Stahl',
+  munition: 'Munition',
+  fuel: 'Treibstoff',
+};
+
+app.get('/api/players', authMiddleware, (req: AuthRequest, res) => {
+  const me = req.userId!;
+  const rows = db
+    .prepare(
+      `SELECT u.id, u.username, u.faction, u.total_points, u.last_seen_at,
+              a.tag as alliance_tag,
+              (SELECT COUNT(*) FROM bases b WHERE b.user_id = u.id) as bases_count
+       FROM users u
+       LEFT JOIN alliances a ON a.id = u.alliance_id
+       WHERE u.is_ai = 0
+       ORDER BY u.total_points DESC, u.id ASC`
+    )
+    .all() as Array<{
+    id: number;
+    username: string;
+    faction: FactionId;
+    total_points: number;
+    last_seen_at: number;
+    alliance_tag: string | null;
+    bases_count: number;
+  }>;
+
+  const pacts = db
+    .prepare(
+      `SELECT id, requester_id, target_id, pact_type, status
+       FROM diplomatic_pacts
+       WHERE requester_id = ? OR target_id = ?`
+    )
+    .all(me, me) as Array<{
+    id: number;
+    requester_id: number;
+    target_id: number;
+    pact_type: PactType;
+    status: 'pending' | 'active';
+  }>;
+
+  const pactByOther = new Map<
+    number,
+    { status: 'pending_out' | 'pending_in' | 'active'; pactType: PactType; pactId: number }
+  >();
+  for (const p of pacts) {
+    const other = p.requester_id === me ? p.target_id : p.requester_id;
+    pactByOther.set(other, {
+      status:
+        p.status === 'active'
+          ? 'active'
+          : p.requester_id === me
+            ? 'pending_out'
+            : 'pending_in',
+      pactType: p.pact_type,
+      pactId: p.id,
+    });
+  }
+
+  const players: PlayerListItem[] = rows
+    .map((r) => {
+      const pInfo = pactByOther.get(r.id);
+      return {
+        userId: r.id,
+        username: r.username,
+        faction: r.faction || 'mitteleuropa',
+        allianceTag: r.alliance_tag,
+        points: r.total_points,
+        basesCount: r.bases_count,
+        isOnline: isUserOnline(r.id),
+        lastSeenAt: r.last_seen_at,
+        pactStatus: pInfo?.status ?? ('none' as const),
+        pactType: pInfo?.pactType,
+        pactId: pInfo?.pactId,
+      };
+    })
+    .sort((a, b) => Number(b.isOnline) - Number(a.isOnline) || b.points - a.points);
+
+  res.json({ players });
+});
+
+app.get('/api/pacts', authMiddleware, (req: AuthRequest, res) => {
+  const me = req.userId!;
+  const rows = db
+    .prepare(
+      `SELECT p.id, p.requester_id, p.target_id, p.pact_type, p.status, p.created_at,
+              u1.username as requester_name, u2.username as target_name
+       FROM diplomatic_pacts p
+       JOIN users u1 ON u1.id = p.requester_id
+       JOIN users u2 ON u2.id = p.target_id
+       WHERE p.requester_id = ? OR p.target_id = ?
+       ORDER BY p.created_at DESC`
+    )
+    .all(me, me) as Array<{
+    id: number;
+    requester_id: number;
+    target_id: number;
+    pact_type: PactType;
+    status: 'pending' | 'active';
+    created_at: number;
+    requester_name: string;
+    target_name: string;
+  }>;
+
+  const pacts: DiplomaticPact[] = rows.map((r) => ({
+    id: r.id,
+    requesterId: r.requester_id,
+    requesterName: r.requester_name,
+    targetId: r.target_id,
+    targetName: r.target_name,
+    pactType: r.pact_type,
+    status: r.status,
+    createdAt: r.created_at,
+  }));
+
+  res.json({ pacts });
+});
+
+app.post('/api/pacts', authMiddleware, (req: AuthRequest, res) => {
+  const me = req.userId!;
+  const targetUserId = Number(req.body?.targetUserId);
+  const pactType: PactType =
+    req.body?.pactType === 'military_alliance' ? 'military_alliance' : 'nap';
+
+  if (!targetUserId || targetUserId === me) {
+    res.status(400).json({ error: 'Ungültiger Vertragspartner.' });
+    return;
+  }
+
+  const target = db
+    .prepare('SELECT id, username, is_ai FROM users WHERE id = ?')
+    .get(targetUserId) as { id: number; username: string; is_ai: number } | undefined;
+  if (!target || target.is_ai === 1) {
+    res.status(404).json({ error: 'Spieler nicht gefunden.' });
+    return;
+  }
+
+  const existing = db
+    .prepare(
+      `SELECT id FROM diplomatic_pacts
+       WHERE (requester_id = ? AND target_id = ?) OR (requester_id = ? AND target_id = ?)`
+    )
+    .get(me, targetUserId, targetUserId, me);
+  if (existing) {
+    res.status(409).json({ error: 'Es besteht bereits ein Vertrag oder eine offene Anfrage mit diesem Spieler.' });
+    return;
+  }
+
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO diplomatic_pacts (requester_id, target_id, pact_type, status, created_at)
+     VALUES (?, ?, ?, 'pending', ?)`
+  ).run(me, targetUserId, pactType, now);
+
+  const label = pactType === 'military_alliance' ? 'Militärbündnis' : 'Nichtangriffspakt (NAP)';
+  sendMessage(
+    targetUserId,
+    'diplomacy',
+    `Vertragsangebot: ${label} von ${req.username}`,
+    `${req.username} bietet dir ein ${label} an. Öffne „Spieler & Handel“, um den Vertrag anzunehmen oder abzulehnen.`,
+    null,
+    now
+  );
+
+  res.json({ ok: true });
+});
+
+app.post('/api/pacts/:id/accept', authMiddleware, (req: AuthRequest, res) => {
+  const me = req.userId!;
+  const pactId = Number(req.params.id);
+  const pact = db
+    .prepare('SELECT * FROM diplomatic_pacts WHERE id = ? AND target_id = ? AND status = ?')
+    .get(pactId, me, 'pending') as
+    | { id: number; requester_id: number; pact_type: PactType }
+    | undefined;
+
+  if (!pact) {
+    res.status(404).json({ error: 'Offenes Vertragsangebot nicht gefunden.' });
+    return;
+  }
+
+  db.prepare("UPDATE diplomatic_pacts SET status = 'active' WHERE id = ?").run(pactId);
+  const label = pact.pact_type === 'military_alliance' ? 'Militärbündnis' : 'Nichtangriffspakt (NAP)';
+  sendMessage(
+    pact.requester_id,
+    'diplomacy',
+    `${label} unterzeichnet mit ${req.username}`,
+    `${req.username} hat dein ${label} angenommen! Gegenseitige Angriffe sind nun gesperrt.`,
+    null,
+    Date.now()
+  );
+
+  res.json({ ok: true });
+});
+
+app.delete('/api/pacts/:id', authMiddleware, (req: AuthRequest, res) => {
+  const me = req.userId!;
+  const pactId = Number(req.params.id);
+  const pact = db
+    .prepare('SELECT * FROM diplomatic_pacts WHERE id = ? AND (requester_id = ? OR target_id = ?)')
+    .get(pactId, me, me) as
+    | { id: number; requester_id: number; target_id: number; pact_type: PactType; status: string }
+    | undefined;
+
+  if (!pact) {
+    res.status(404).json({ error: 'Vertrag nicht gefunden.' });
+    return;
+  }
+
+  db.prepare('DELETE FROM diplomatic_pacts WHERE id = ?').run(pactId);
+  const otherId = pact.requester_id === me ? pact.target_id : pact.requester_id;
+  const label = pact.pact_type === 'military_alliance' ? 'Militärbündnis' : 'Nichtangriffspakt';
+  sendMessage(
+    otherId,
+    'diplomacy',
+    `${label} beendet (${req.username})`,
+    `${req.username} hat das bestehende ${label} bzw. das Vertragsangebot aufgehoben.`,
+    null,
+    Date.now()
+  );
+
+  res.json({ ok: true });
+});
+
+app.get('/api/trades', authMiddleware, (_req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT t.id, t.seller_user_id, t.seller_base_id, t.offer_resource, t.offer_amount,
+              t.want_resource, t.want_amount, t.created_at,
+              u.username as seller_name, a.tag as seller_alliance_tag
+       FROM trade_offers t
+       JOIN users u ON u.id = t.seller_user_id
+       LEFT JOIN alliances a ON a.id = u.alliance_id
+       WHERE t.status = 'open'
+       ORDER BY t.created_at DESC LIMIT 50`
+    )
+    .all() as Array<{
+    id: number;
+    seller_user_id: number;
+    seller_base_id: number;
+    offer_resource: ResourceType;
+    offer_amount: number;
+    want_resource: ResourceType;
+    want_amount: number;
+    created_at: number;
+    seller_name: string;
+    seller_alliance_tag: string | null;
+  }>;
+
+  const offers: TradeOffer[] = rows.map((r) => ({
+    id: r.id,
+    sellerUserId: r.seller_user_id,
+    sellerName: r.seller_name,
+    sellerAllianceTag: r.seller_alliance_tag,
+    sellerBaseId: r.seller_base_id,
+    offerResource: r.offer_resource,
+    offerAmount: r.offer_amount,
+    wantResource: r.want_resource,
+    wantAmount: r.want_amount,
+    createdAt: r.created_at,
+  }));
+
+  res.json({ offers });
+});
+
+app.post('/api/trades', authMiddleware, (req: AuthRequest, res) => {
+  const now = Date.now();
+  const baseId = Number(req.body?.baseId);
+  const offerResource = String(req.body?.offerResource || '') as ResourceType;
+  const wantResource = String(req.body?.wantResource || '') as ResourceType;
+  const offerAmount = Math.floor(Number(req.body?.offerAmount || 0));
+  const wantAmount = Math.floor(Number(req.body?.wantAmount || 0));
+
+  if (!['steel', 'munition', 'fuel'].includes(offerResource) || !['steel', 'munition', 'fuel'].includes(wantResource)) {
+    res.status(400).json({ error: 'Ungültiger Rohstofftyp.' });
+    return;
+  }
+  if (offerResource === wantResource) {
+    res.status(400).json({ error: 'Angebotener und gesuchter Rohstoff müssen unterschiedlich sein.' });
+    return;
+  }
+  if (offerAmount < 100 || wantAmount < 100 || offerAmount > 500000 || wantAmount > 500000) {
+    res.status(400).json({ error: 'Handelsmengen müssen zwischen 100 und 500.000 liegen.' });
+    return;
+  }
+
+  const base = syncBase(baseId, now);
+  if (!base || base.userId !== req.userId) {
+    res.status(404).json({ error: 'Stützpunkt nicht gefunden.' });
+    return;
+  }
+  if (base.resources[offerResource] < offerAmount) {
+    res.status(400).json({ error: `Nicht genügend ${RESOURCE_NAMES[offerResource]} im Stützpunkt.` });
+    return;
+  }
+
+  // Reserve offered resource in escrow
+  db.prepare(`UPDATE bases SET ${offerResource} = ${offerResource} - ? WHERE id = ?`).run(
+    offerAmount,
+    baseId
+  );
+
+  db.prepare(
+    `INSERT INTO trade_offers (seller_user_id, seller_base_id, offer_resource, offer_amount, want_resource, want_amount, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'open', ?)`
+  ).run(req.userId!, baseId, offerResource, offerAmount, wantResource, wantAmount, now);
+
+  res.json({ ok: true });
+});
+
+app.post('/api/trades/:id/accept', authMiddleware, (req: AuthRequest, res) => {
+  const now = Date.now();
+  const offerId = Number(req.params.id);
+  const buyerBaseId = Number(req.body?.baseId);
+
+  const offer = db
+    .prepare("SELECT * FROM trade_offers WHERE id = ? AND status = 'open'")
+    .get(offerId) as
+    | {
+        id: number;
+        seller_user_id: number;
+        seller_base_id: number;
+        offer_resource: ResourceType;
+        offer_amount: number;
+        want_resource: ResourceType;
+        want_amount: number;
+      }
+    | undefined;
+
+  if (!offer) {
+    res.status(404).json({ error: 'Handelsangebot nicht mehr verfügbar.' });
+    return;
+  }
+  if (offer.seller_user_id === req.userId) {
+    res.status(400).json({ error: 'Du kannst dein eigenes Angebot nicht annehmen.' });
+    return;
+  }
+
+  const buyerBase = syncBase(buyerBaseId, now);
+  if (!buyerBase || buyerBase.userId !== req.userId) {
+    res.status(404).json({ error: 'Stützpunkt nicht gefunden.' });
+    return;
+  }
+  if (buyerBase.resources[offer.want_resource] < offer.want_amount) {
+    res.status(400).json({
+      error: `Nicht genügend ${RESOURCE_NAMES[offer.want_resource]} für diesen Handel.`,
+    });
+    return;
+  }
+
+  // Atomic resource swap
+  db.prepare(
+    `UPDATE bases SET ${offer.want_resource} = ${offer.want_resource} - ?, ${offer.offer_resource} = ${offer.offer_resource} + ? WHERE id = ?`
+  ).run(offer.want_amount, offer.offer_amount, buyerBaseId);
+
+  db.prepare(
+    `UPDATE bases SET ${offer.want_resource} = ${offer.want_resource} + ? WHERE id = ?`
+  ).run(offer.want_amount, offer.seller_base_id);
+
+  db.prepare("UPDATE trade_offers SET status = 'completed' WHERE id = ?").run(offerId);
+
+  sendMessage(
+    offer.seller_user_id,
+    'transport',
+    `Handel abgeschlossen mit ${req.username}`,
+    `${req.username} hat dein Angebot angenommen: Du erhältst ${offer.want_amount.toLocaleString('de-DE')} ${RESOURCE_NAMES[offer.want_resource]} für ${offer.offer_amount.toLocaleString('de-DE')} ${RESOURCE_NAMES[offer.offer_resource]}.`,
+    null,
+    now
+  );
+
+  res.json({ ok: true });
+});
+
+app.delete('/api/trades/:id', authMiddleware, (req: AuthRequest, res) => {
+  const offerId = Number(req.params.id);
+  const offer = db
+    .prepare("SELECT * FROM trade_offers WHERE id = ? AND seller_user_id = ? AND status = 'open'")
+    .get(offerId, req.userId!) as
+    | { id: number; seller_base_id: number; offer_resource: ResourceType; offer_amount: number }
+    | undefined;
+
+  if (!offer) {
+    res.status(404).json({ error: 'Offenes eigenes Handelsangebot nicht gefunden.' });
+    return;
+  }
+
+  db.prepare("UPDATE trade_offers SET status = 'cancelled' WHERE id = ?").run(offerId);
+  db.prepare(
+    `UPDATE bases SET ${offer.offer_resource} = ${offer.offer_resource} + ? WHERE id = ?`
+  ).run(offer.offer_amount, offer.seller_base_id);
+
   res.json({ ok: true });
 });
 

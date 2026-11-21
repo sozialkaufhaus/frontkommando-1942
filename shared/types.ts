@@ -342,3 +342,43 @@ export interface AllianceInfo {
   totalPoints: number;
   members?: AllianceMember[];
 }
+
+export type PactType = 'nap' | 'military_alliance';
+
+export interface DiplomaticPact {
+  id: number;
+  requesterId: number;
+  requesterName: string;
+  targetId: number;
+  targetName: string;
+  pactType: PactType;
+  status: 'pending' | 'active';
+  createdAt: number;
+}
+
+export interface PlayerListItem {
+  userId: number;
+  username: string;
+  faction: FactionId;
+  allianceTag: string | null;
+  points: number;
+  basesCount: number;
+  isOnline: boolean;
+  lastSeenAt: number;
+  pactStatus: 'none' | 'pending_out' | 'pending_in' | 'active';
+  pactType?: PactType;
+  pactId?: number;
+}
+
+export interface TradeOffer {
+  id: number;
+  sellerUserId: number;
+  sellerName: string;
+  sellerAllianceTag: string | null;
+  sellerBaseId: number;
+  offerResource: ResourceType;
+  offerAmount: number;
+  wantResource: ResourceType;
+  wantAmount: number;
+  createdAt: number;
+}

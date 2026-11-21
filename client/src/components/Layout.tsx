@@ -51,7 +51,7 @@ const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: React.ComponentType<{ 
   { id: 'defense', label: 'Verteidigung', icon: Shield },
   { id: 'sectors', label: 'Sektoren-Liste', icon: MapIcon },
   { id: 'fleet', label: 'Marschbefehl', icon: Compass },
-  { id: 'diplomacy', label: 'Allianz & Funk', icon: Radio },
+  { id: 'diplomacy', label: 'Spieler, Chat & Handel', icon: Radio },
   { id: 'messages', label: 'Nachrichten', icon: Mail },
   { id: 'highscore', label: 'Rangliste', icon: Award },
 ];

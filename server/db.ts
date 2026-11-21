@@ -152,10 +152,37 @@ export function initDatabase(): void {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS trade_offers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      seller_user_id INTEGER NOT NULL,
+      seller_base_id INTEGER NOT NULL,
+      offer_resource TEXT NOT NULL,
+      offer_amount INTEGER NOT NULL,
+      want_resource TEXT NOT NULL,
+      want_amount INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (seller_user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (seller_base_id) REFERENCES bases(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS diplomatic_pacts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      requester_id INTEGER NOT NULL,
+      target_id INTEGER NOT NULL,
+      pact_type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (requester_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (target_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_bases_sector ON bases(sector, position);
     CREATE INDEX IF NOT EXISTS idx_missions_status ON missions(status, arrives_at, returns_at);
     CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_chat_channel ON chat_messages(channel, alliance_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_trade_status ON trade_offers(status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_pacts_users ON diplomatic_pacts(requester_id, target_id, status);
   `);
 
   // Safe migration for existing databases
@@ -164,4 +191,7 @@ export function initDatabase(): void {
   ensureColumn('users', 'last_seen_at', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('users', 'tutorial_step', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('users', 'tutorial_dismissed', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('users', 'google_sub', 'TEXT');
+  ensureColumn('users', 'email', 'TEXT');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub) WHERE google_sub IS NOT NULL;');
 }

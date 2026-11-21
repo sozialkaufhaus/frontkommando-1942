@@ -1,7 +1,23 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Crosshair, KeyRound, Shield, UserPlus, Zap } from 'lucide-react';
 import { FACTIONS, FACTION_ORDER, type FactionId } from '@shared/worldMap';
 import { api, setStoredToken } from '../api';
+
+declare global {
+  interface Window {
+    google?: {
+      accounts: {
+        id: {
+          initialize: (cfg: {
+            client_id: string;
+            callback: (resp: { credential?: string }) => void;
+          }) => void;
+          renderButton: (el: HTMLElement, opts: Record<string, unknown>) => void;
+        };
+      };
+    };
+  }
+}
 
 interface AuthScreenProps {
   onAuthenticated: () => void;
@@ -14,6 +30,67 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [googleClientId, setGoogleClientId] = useState<string | null>(null);
+  const [showGoogleHint, setShowGoogleHint] = useState(false);
+  const googleBtnRef = useRef<HTMLDivElement>(null);
+  const factionRef = useRef<FactionId>(faction);
+  factionRef.current = faction;
+
+  useEffect(() => {
+    api
+      .getAuthProviders()
+      .then((res) => {
+        if (res.googleEnabled && res.googleClientId) {
+          setGoogleClientId(res.googleClientId);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!googleClientId || !googleBtnRef.current) return;
+
+    const initGsi = () => {
+      if (!window.google || !googleBtnRef.current) return;
+      googleBtnRef.current.innerHTML = '';
+      window.google.accounts.id.initialize({
+        client_id: googleClientId,
+        callback: async (resp) => {
+          if (!resp.credential) return;
+          setError(null);
+          setLoading(true);
+          try {
+            const res = await api.loginWithGoogle(resp.credential, factionRef.current);
+            setStoredToken(res.token);
+            onAuthenticated();
+          } catch (err) {
+            setError(err instanceof Error ? err.message : 'Google-Anmeldung fehlgeschlagen.');
+          } finally {
+            setLoading(false);
+          }
+        },
+      });
+      window.google.accounts.id.renderButton(googleBtnRef.current, {
+        theme: 'filled_black',
+        size: 'large',
+        width: 280,
+        text: 'continue_with',
+        locale: 'de',
+      });
+    };
+
+    if (window.google) {
+      initGsi();
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.async = true;
+    script.defer = true;
+    script.onload = initGsi;
+    document.head.appendChild(script);
+  }, [googleClientId, onAuthenticated]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -239,7 +316,53 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             </button>
           </form>
 
-          <p className="mt-5 text-[11px] text-stone-500 text-center leading-relaxed">
+          {/* Google Sign-In / Registration */}
+          <div className="mt-5 pt-4 border-t border-stone-800 space-y-2.5">
+            <div className="text-[10px] uppercase tracking-[0.2em] text-stone-400 text-center">
+              Oder mit Google-Konto
+            </div>
+            {googleClientId ? (
+              <div ref={googleBtnRef} className="flex justify-center" />
+            ) : (
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setShowGoogleHint((v) => !v)}
+                  className="w-full py-2.5 px-4 rounded-lg bg-white hover:bg-stone-100 text-[#1f1f1f] font-semibold text-xs flex items-center justify-center gap-2.5 transition cursor-pointer shadow"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24">
+                    <path
+                      fill="#4285F4"
+                      d="M23.49 12.27c0-.79-.07-1.54-.2-2.27H12v4.3h6.44a5.5 5.5 0 0 1-2.39 3.61v3h3.87c2.26-2.08 3.57-5.15 3.57-8.64z"
+                    />
+                    <path
+                      fill="#34A853"
+                      d="M12 24c3.24 0 5.95-1.07 7.93-2.91l-3.87-3c-1.07.72-2.45 1.15-4.06 1.15-3.12 0-5.77-2.11-6.72-4.96H1.28v3.1A12 12 0 0 0 12 24z"
+                    />
+                    <path
+                      fill="#FBBC05"
+                      d="M5.28 14.28A7.2 7.2 0 0 1 4.9 12c0-.79.14-1.56.38-2.28v-3.1H1.28A12 12 0 0 0 0 12c0 1.94.46 3.77 1.28 5.38l4-3.1z"
+                    />
+                    <path
+                      fill="#EA4335"
+                      d="M12 4.76c1.76 0 3.34.61 4.58 1.8l3.44-3.44C17.95 1.19 15.24 0 12 0A12 12 0 0 0 1.28 6.62l4 3.1C6.23 6.87 8.88 4.76 12 4.76z"
+                    />
+                  </svg>
+                  Mit Google anmelden / registrieren
+                </button>
+                {showGoogleHint && (
+                  <div className="mt-2 p-2.5 rounded-lg bg-amber-950/50 border border-amber-600/40 text-[11px] text-amber-200 leading-relaxed">
+                    Google-Login ist bereit! Setze einfach die Umgebungsvariable{' '}
+                    <code className="font-mono-num text-amber-100">GOOGLE_CLIENT_ID</code> (aus der
+                    Google Cloud Console → OAuth 2.0 Web-Client) auf deinem Server oder in Render,
+                    dann funktioniert der Button sofort automatisch.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <p className="mt-4 text-[11px] text-stone-500 text-center leading-relaxed">
             Dein Fortschritt, Rohstoffe und laufende Operationen werden dauerhaft in der SQLite-Datenbank gespeichert.
           </p>
         </div>

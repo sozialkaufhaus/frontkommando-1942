@@ -3,13 +3,18 @@ import type {
   BuildingId,
   ChatMessage,
   CombatEntityId,
+  DiplomaticPact,
   GameMessage,
   GameStateResponse,
   HighscoreEntry,
   MissionType,
+  PactType,
+  PlayerListItem,
   ResearchId,
+  ResourceType,
   Resources,
   SectorSlot,
+  TradeOffer,
   UnitId,
   WorldProvinceState,
 } from '@shared/types';
@@ -62,6 +67,15 @@ export const api = {
     request<{ token: string; username: string }>('/api/auth/quickstart', {
       method: 'POST',
       body: JSON.stringify({ faction }),
+    }),
+
+  getAuthProviders: () =>
+    request<{ googleEnabled: boolean; googleClientId: string | null }>('/api/auth/providers'),
+
+  loginWithGoogle: (credential: string, faction: FactionId = 'mitteleuropa') =>
+    request<{ token: string; username: string; isNew: boolean }>('/api/auth/google', {
+      method: 'POST',
+      body: JSON.stringify({ credential, faction }),
     }),
 
   setFaction: (faction: FactionId) =>
@@ -193,6 +207,45 @@ export const api = {
 
   leaveAlliance: () =>
     request<{ ok: boolean }>('/api/alliances/leave', { method: 'POST' }),
+
+  getPlayers: () => request<{ players: PlayerListItem[] }>('/api/players'),
+
+  getPacts: () => request<{ pacts: DiplomaticPact[] }>('/api/pacts'),
+
+  proposePact: (targetUserId: number, pactType: PactType) =>
+    request<{ ok: boolean }>('/api/pacts', {
+      method: 'POST',
+      body: JSON.stringify({ targetUserId, pactType }),
+    }),
+
+  acceptPact: (pactId: number) =>
+    request<{ ok: boolean }>(`/api/pacts/${pactId}/accept`, { method: 'POST' }),
+
+  cancelPact: (pactId: number) =>
+    request<{ ok: boolean }>(`/api/pacts/${pactId}`, { method: 'DELETE' }),
+
+  getTrades: () => request<{ offers: TradeOffer[] }>('/api/trades'),
+
+  createTrade: (payload: {
+    baseId: number;
+    offerResource: ResourceType;
+    offerAmount: number;
+    wantResource: ResourceType;
+    wantAmount: number;
+  }) =>
+    request<{ ok: boolean }>('/api/trades', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  acceptTrade: (offerId: number, baseId: number) =>
+    request<{ ok: boolean }>(`/api/trades/${offerId}/accept`, {
+      method: 'POST',
+      body: JSON.stringify({ baseId }),
+    }),
+
+  cancelTrade: (offerId: number) =>
+    request<{ ok: boolean }>(`/api/trades/${offerId}`, { method: 'DELETE' }),
 
   getHighscore: () => request<{ entries: HighscoreEntry[] }>('/api/highscore'),
 };
