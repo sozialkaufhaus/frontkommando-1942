@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" width="640" height="360">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="48%" r="68%">
+      <stop offset="0%" stop-color="#222a24"/>
+      <stop offset="55%" stop-color="#141816"/>
+      <stop offset="100%" stop-color="#0a0c0b"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="50%" cy="62%" r="42%">
+      <stop offset="0%" stop-color="#d99a3a" stop-opacity="0.32"/>
+      <stop offset="65%" stop-color="#d99a3a" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#d99a3a" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="metal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7c877b"/>
+      <stop offset="45%" stop-color="#475046"/>
+      <stop offset="100%" stop-color="#222723"/>
+    </linearGradient>
+    <linearGradient id="brass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f3c669"/>
+      <stop offset="100%" stop-color="#8b6423"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#a69c7c" stroke-opacity="0.07" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="640" height="360" fill="url(#bg)"/>
+  <rect width="640" height="360" fill="url(#grid)"/>
+  <ellipse cx="320" cy="220" rx="280" ry="130" fill="url(#glow)"/>
+  <!-- Subtle tactical contour rings -->
+  <ellipse cx="320" cy="255" rx="240" ry="52" fill="none" stroke="#c7b68a" stroke-opacity="0.11" stroke-width="1.2" stroke-dasharray="6 6"/>
+  <ellipse cx="320" cy="255" rx="165" ry="34" fill="none" stroke="#c7b68a" stroke-opacity="0.14" stroke-width="1"/>
+  <!-- Corner reticles -->
+  <path d="M 20 42 L 20 20 L 42 20 M 620 42 L 620 20 L 598 20 M 20 318 L 20 340 L 42 340 M 620 318 L 620 340 L 598 340" fill="none" stroke="#d9a544" stroke-opacity="0.45" stroke-width="2"/>
+  <g>
+    <!-- Sandbag semicircle emplacement -->
+    <path d="M 160 276 Q 320 205 480 276 Z" fill="#323932" stroke="#859182" stroke-width="2"/>
+    <ellipse cx="220" cy="254" rx="44" ry="14" fill="#4b5349" stroke="#8a9687"/>
+    <ellipse cx="320" cy="242" rx="48" ry="15" fill="#4b5349" stroke="#8a9687"/>
+    <ellipse cx="420" cy="254" rx="44" ry="14" fill="#4b5349" stroke="#8a9687"/>
+    <!-- Tripod & Heavy MG -->
+    <line x1="296" y1="240" x2="320" y2="196" stroke="#9aa697" stroke-width="5"/>
+    <line x1="344" y1="240" x2="320" y2="196" stroke="#9aa697" stroke-width="5"/>
+    <rect x="282" y="182" width="74" height="20" rx="4" fill="url(#metal)" stroke="#cfdacc"/>
+    <line x1="356" y1="190" x2="462" y2="184" stroke="#e0e8dc" stroke-width="7" stroke-linecap="round"/>
+    <polygon points="468,184 510,168 498,184 510,200" fill="#ffb84d" fill-opacity="0.75"/>
+  </g>
+  <!-- Horizon ground line -->
+  <line x1="56" y1="276" x2="584" y2="276" stroke="#c9b88b" stroke-opacity="0.22" stroke-width="1.5"/>
+  <!-- Tactical stamp -->
+  <rect x="26" y="24" width="136" height="22" rx="2" fill="#0d100e" fill-opacity="0.72" stroke="#d9a544" stroke-opacity="0.4"/>
+  <text x="36" y="39" font-family="monospace" font-size="11" fill="#e4bc6a" letter-spacing="1.5">VERT // MG-NEST</text>
+</svg>

@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" width="640" height="360">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="48%" r="68%">
+      <stop offset="0%" stop-color="#222a24"/>
+      <stop offset="55%" stop-color="#141816"/>
+      <stop offset="100%" stop-color="#0a0c0b"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="50%" cy="62%" r="42%">
+      <stop offset="0%" stop-color="#79a8b8" stop-opacity="0.32"/>
+      <stop offset="65%" stop-color="#79a8b8" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#79a8b8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="metal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7c877b"/>
+      <stop offset="45%" stop-color="#475046"/>
+      <stop offset="100%" stop-color="#222723"/>
+    </linearGradient>
+    <linearGradient id="brass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f3c669"/>
+      <stop offset="100%" stop-color="#8b6423"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#a69c7c" stroke-opacity="0.07" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="640" height="360" fill="url(#bg)"/>
+  <rect width="640" height="360" fill="url(#grid)"/>
+  <ellipse cx="320" cy="220" rx="280" ry="130" fill="url(#glow)"/>
+  <!-- Subtle tactical contour rings -->
+  <ellipse cx="320" cy="255" rx="240" ry="52" fill="none" stroke="#c7b68a" stroke-opacity="0.11" stroke-width="1.2" stroke-dasharray="6 6"/>
+  <ellipse cx="320" cy="255" rx="165" ry="34" fill="none" stroke="#c7b68a" stroke-opacity="0.14" stroke-width="1"/>
+  <!-- Corner reticles -->
+  <path d="M 20 42 L 20 20 L 42 20 M 620 42 L 620 20 L 598 20 M 20 318 L 20 340 L 42 340 M 620 318 L 620 340 L 598 340" fill="none" stroke="#d9a544" stroke-opacity="0.45" stroke-width="2"/>
+  <g>
+    <!-- Control tower -->
+    <rect x="440" y="120" width="44" height="156" fill="url(#metal)" stroke="#8c978b" stroke-opacity="0.3"/>
+    <rect x="430" y="102" width="64" height="26" fill="#2c3531" stroke="#d9a544" stroke-opacity="0.5"/>
+    <rect x="436" y="108" width="52" height="12" fill="#f3c062" fill-opacity="0.6"/>
+    <!-- Hangar -->
+    <path d="M 110 276 L 110 194 Q 230 132 350 194 L 350 276 Z" fill="url(#metal)" stroke="#8c978b" stroke-opacity="0.35" stroke-width="2"/>
+    <rect x="148" y="206" width="164" height="70" fill="#101412" stroke="#d9a544" stroke-opacity="0.35"/>
+    <!-- Runway perspective -->
+    <polygon points="80,315 560,315 470,276 170,276" fill="#1b211e" stroke="#8d998c" stroke-opacity="0.25"/>
+    <line x1="320" y1="278" x2="320" y2="312" stroke="#e4bc6a" stroke-width="3" stroke-dasharray="6 6"/>
+    <!-- Fighter silhouette overhead -->
+    <path d="M 270 96 L 312 104 L 354 96 L 318 112 L 320 132 L 304 132 L 306 112 Z" fill="#9fb0a4" fill-opacity="0.85"/>
+  </g>
+  <!-- Horizon ground line -->
+  <line x1="56" y1="276" x2="584" y2="276" stroke="#c9b88b" stroke-opacity="0.22" stroke-width="1.5"/>
+  <!-- Tactical stamp -->
+  <rect x="26" y="24" width="136" height="22" rx="2" fill="#0d100e" fill-opacity="0.72" stroke="#d9a544" stroke-opacity="0.4"/>
+  <text x="36" y="39" font-family="monospace" font-size="11" fill="#e4bc6a" letter-spacing="1.5">LUFT // BASIS</text>
+</svg>

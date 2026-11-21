@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background-color: #0b0d0c;
+    color: #e5e2d9;
+    overflow-x: hidden;
+  }
+
+  .font-display {
+    font-family: 'Cinzel', Georgia, serif;
+  }
+
+  .font-mono-num {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Custom dark military scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #101311;
+}
+::-webkit-scrollbar-thumb {
+  background: #2b322c;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #465044;
+}
+
+/* Tactical card subtle bevel */
+.ops-panel {
+  background: linear-gradient(180deg, rgba(22, 26, 23, 0.94) 0%, rgba(14, 17, 15, 0.96) 100%);
+  border: 1px solid rgba(132, 124, 98, 0.22);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 240, 200, 0.05);
+}
+
+.ops-card {
+  background: linear-gradient(180deg, rgba(26, 30, 27, 0.92) 0%, rgba(16, 19, 17, 0.96) 100%);
+  border: 1px solid rgba(140, 132, 106, 0.22);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 240, 200, 0.04);
+  transition: border-color 180ms ease, transform 180ms ease, box-shadow 180ms ease;
+}
+
+.ops-card:hover {
+  border-color: rgba(217, 165, 68, 0.45);
+}
+
+.ops-grid-bg {
+  background-image:
+    linear-gradient(rgba(180, 168, 128, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(180, 168, 128, 0.035) 1px, transparent 1px);
+  background-size: 32px 32px;
+}

@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: frontkommando-1942
+    runtime: docker
+    plan: free
+    envVars:
+      - key: PORT
+        value: 3001
+      - key: DATA_DIR
+        value: /app/data
+    disk:
+      name: fk1942-sqlite
+      mountPath: /app/data
+      sizeGB: 1

@@ -1,0 +1,1279 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import bcrypt from 'bcryptjs';
+import cors from 'cors';
+import express, { type NextFunction, type Request, type Response } from 'express';
+import {
+  BUILDINGS,
+  DEFENSES,
+  MAX_SECTORS,
+  POSITIONS_PER_SECTOR,
+  RESEARCH,
+  UNITS,
+  checkPrerequisites,
+  getBuildingCost,
+  getBuildingDurationSec,
+  getFleetTravelStats,
+  getMaxBases,
+  getMaxSimultaneousMissions,
+  getResearchCost,
+  getResearchDurationSec,
+  getUnitDurationSec,
+} from '../shared/gameData';
+import type {
+  AllianceInfo,
+  AllianceMember,
+  BaseSummary,
+  BuildingId,
+  ChatMessage,
+  CombatEntityId,
+  DefenseId,
+  GameMessage,
+  GameStateResponse,
+  HighscoreEntry,
+  MissionType,
+  ResearchId,
+  Resources,
+  SectorSlot,
+  UnitId,
+} from '../shared/types';
+import { db, initDatabase } from './db';
+import {
+  emptyBuildings,
+  emptyDefenses,
+  emptyResearch,
+  emptyUnits,
+  getActiveMissionsForUser,
+  getUserResearch,
+  processDueMissions,
+  recalculatePoints,
+  sendMessage,
+  syncBase,
+  syncUserResearch,
+} from './engine';
+import {
+  broadcastChatMessage,
+  getOnlineCount,
+  isUserOnline,
+  notifyUser,
+  registerSseClient,
+} from './realtime';
+import { findFreeHomeSlot, seedAiSectors } from './seed';
+
+initDatabase();
+seedAiSectors();
+
+const app = express();
+const PORT = Number(process.env.PORT || 3001);
+
+app.use(cors());
+app.use(express.json());
+
+interface AuthRequest extends Request {
+  userId?: number;
+  username?: string;
+}
+
+function createSession(userId: number): string {
+  const token = crypto.randomBytes(24).toString('hex');
+  db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)').run(
+    token,
+    userId,
+    Date.now()
+  );
+  return token;
+}
+
+function authMiddleware(req: AuthRequest, res: Response, next: NextFunction): void {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Nicht angemeldet.' });
+    return;
+  }
+  const token = auth.slice(7).trim();
+  const row = db
+    .prepare(
+      `SELECT s.user_id, u.username FROM sessions s
+       JOIN users u ON u.id = s.user_id
+       WHERE s.token = ?`
+    )
+    .get(token) as { user_id: number; username: string } | undefined;
+
+  if (!row) {
+    res.status(401).json({ error: 'Sitzung abgelaufen. Bitte erneut anmelden.' });
+    return;
+  }
+  req.userId = row.user_id;
+  req.username = row.username;
+  next();
+}
+
+function createNewCommanderAccount(
+  username: string,
+  passwordHash: string,
+  isQuickstart: boolean
+): { userId: number; token: string } {
+  const now = Date.now();
+  const slot = findFreeHomeSlot();
+
+  const res = db
+    .prepare(
+      `INSERT INTO users (username, password_hash, commander_title, is_ai, created_at)
+       VALUES (?, ?, ?, 0, ?)`
+    )
+    .run(username, passwordHash, isQuickstart ? 'Oberstleutnant' : 'Major', now);
+  const userId = Number(res.lastInsertRowid);
+
+  const research = emptyResearch();
+  if (isQuickstart) {
+    research.engine_tech = 1;
+    research.radio_intel = 1;
+  }
+  db.prepare('INSERT INTO user_research (user_id, levels_json) VALUES (?, ?)').run(
+    userId,
+    JSON.stringify(research)
+  );
+
+  const buildings = emptyBuildings();
+  if (isQuickstart) {
+    buildings.steel_mill = 3;
+    buildings.munition_factory = 2;
+    buildings.refinery = 1;
+    buildings.power_plant = 4;
+    buildings.hq = 2;
+    buildings.tank_works = 1;
+    buildings.research_lab = 1;
+  }
+
+  const units = emptyUnits();
+  if (isQuickstart) {
+    units.scout_car = 3;
+    units.truck_convoy = 2;
+    units.infantry = 8;
+  } else {
+    units.scout_car = 1;
+    units.infantry = 2;
+  }
+
+  const defenses = emptyDefenses();
+  if (isQuickstart) {
+    defenses.mg_nest = 2;
+  }
+
+  db.prepare(
+    `INSERT INTO bases (user_id, name, sector, position, is_home, steel, munition, fuel, buildings_json, units_json, defenses_json, updated_at)
+     VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    userId,
+    `Hauptquartier ${slot.sector}-${slot.position}`,
+    slot.sector,
+    slot.position,
+    isQuickstart ? 4500 : 1800,
+    isQuickstart ? 2800 : 1200,
+    isQuickstart ? 1400 : 500,
+    JSON.stringify(buildings),
+    JSON.stringify(units),
+    JSON.stringify(defenses),
+    now
+  );
+
+  recalculatePoints(userId);
+  sendMessage(
+    userId,
+    'system',
+    'Willkommen im Hauptquartier — FRONTKOMMANDO 1942',
+    `Kommandant ${username}, dein Stützpunkt wurde auf Sektor [${slot.sector}:${slot.position}] eingerichtet. Baue Stahlwerk, Rüstungsfabrik und Kraftwerk aus, entsende Spähwagen in Sektor ${slot.sector} zur Aufklärung von KI-Stellungen und schlage gezielt zu!`,
+    null,
+    now
+  );
+
+  const token = createSession(userId);
+  return { userId, token };
+}
+
+// ================= AUTH ROUTES =================
+
+app.post('/api/auth/register', (req, res) => {
+  try {
+    const rawUser = String(req.body?.username || '').trim();
+    const rawPass = String(req.body?.password || '');
+
+    if (rawUser.length < 3 || rawUser.length > 24) {
+      res.status(400).json({ error: 'Kommandantenname muss 3–24 Zeichen lang sein.' });
+      return;
+    }
+    if (rawPass.length < 4) {
+      res.status(400).json({ error: 'Passwort muss mindestens 4 Zeichen lang sein.' });
+      return;
+    }
+
+    const exists = db.prepare('SELECT id FROM users WHERE LOWER(username) = LOWER(?)').get(rawUser);
+    if (exists) {
+      res.status(409).json({ error: 'Dieser Kommandantenname ist bereits vergeben.' });
+      return;
+    }
+
+    const hash = bcrypt.hashSync(rawPass, 8);
+    const { token } = createNewCommanderAccount(rawUser, hash, false);
+    res.json({ token, username: rawUser });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Registrierung fehlgeschlagen.' });
+  }
+});
+
+app.post('/api/auth/login', (req, res) => {
+  try {
+    const rawUser = String(req.body?.username || '').trim();
+    const rawPass = String(req.body?.password || '');
+
+    const user = db
+      .prepare('SELECT id, username, password_hash, is_ai FROM users WHERE LOWER(username) = LOWER(?)')
+      .get(rawUser) as { id: number; username: string; password_hash: string; is_ai: number } | undefined;
+
+    if (!user || user.is_ai === 1 || !bcrypt.compareSync(rawPass, user.password_hash)) {
+      res.status(401).json({ error: 'Ungültiger Kommandantenname oder falsches Passwort.' });
+      return;
+    }
+
+    const token = createSession(user.id);
+    res.json({ token, username: user.username });
+  } catch {
+    res.status(500).json({ error: 'Anmeldung fehlgeschlagen.' });
+  }
+});
+
+app.post('/api/auth/quickstart', (_req, res) => {
+  try {
+    const suffix = Math.floor(100 + Math.random() * 900);
+    const username = `Kommandant-${suffix}`;
+    const hash = bcrypt.hashSync(crypto.randomBytes(12).toString('hex'), 6);
+    const { token } = createNewCommanderAccount(username, hash, true);
+    res.json({ token, username });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Schnellstart fehlgeschlagen.' });
+  }
+});
+
+app.post('/api/auth/logout', authMiddleware, (req: AuthRequest, res) => {
+  const token = req.headers.authorization?.slice(7).trim();
+  if (token) {
+    db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+  }
+  res.json({ ok: true });
+});
+
+// ================= GAME STATE =================
+
+app.get('/api/state', authMiddleware, (req: AuthRequest, res) => {
+  const now = Date.now();
+  processDueMissions(now);
+
+  const userId = req.userId!;
+  const basesRows = db
+    .prepare('SELECT id, name, sector, position, is_home FROM bases WHERE user_id = ? ORDER BY is_home DESC, id ASC')
+    .all(userId) as Array<{ id: number; name: string; sector: number; position: number; is_home: number }>;
+
+  if (basesRows.length === 0) {
+    res.status(404).json({ error: 'Kein Stützpunkt gefunden.' });
+    return;
+  }
+
+  const requestedBaseId = Number(req.query.baseId);
+  const chosenBase =
+    basesRows.find((b) => b.id === requestedBaseId) || basesRows[0];
+
+  // Sync active base & research
+  const activeBase = syncBase(chosenBase.id, now);
+  if (!activeBase) {
+    res.status(404).json({ error: 'Stützpunkt nicht gefunden.' });
+    return;
+  }
+
+  const { levels: research, queue: researchQueue } = syncUserResearch(userId, now);
+  const { active: activeMissions, incoming: incomingMissions } = getActiveMissionsForUser(userId);
+
+  const userRow = db
+    .prepare(
+      `SELECT u.id, u.username, u.commander_title, u.total_points, u.alliance_id,
+              a.tag as alliance_tag, a.name as alliance_name
+       FROM users u
+       LEFT JOIN alliances a ON a.id = u.alliance_id
+       WHERE u.id = ?`
+    )
+    .get(userId) as {
+    id: number;
+    username: string;
+    commander_title: string;
+    total_points: number;
+    alliance_id: number | null;
+    alliance_tag: string | null;
+    alliance_name: string | null;
+  };
+
+  db.prepare('UPDATE users SET last_seen_at = ? WHERE id = ?').run(now, userId);
+
+  const unread = (
+    db.prepare('SELECT COUNT(*) as c FROM messages WHERE user_id = ? AND is_read = 0').get(userId) as {
+      c: number;
+    }
+  ).c;
+
+  const bases: BaseSummary[] = basesRows.map((b) => ({
+    id: b.id,
+    name: b.name,
+    sector: b.sector,
+    position: b.position,
+    isHome: b.is_home === 1,
+  }));
+
+  const payload: GameStateResponse = {
+    serverTime: now,
+    onlineCount: Math.max(1, getOnlineCount()),
+    user: {
+      id: userRow.id,
+      username: userRow.username,
+      commanderTitle: userRow.commander_title,
+      points: userRow.total_points,
+      unreadMessages: unread,
+      allianceId: userRow.alliance_id,
+      allianceTag: userRow.alliance_tag,
+      allianceName: userRow.alliance_name,
+    },
+    bases,
+    activeBase,
+    research,
+    researchQueue,
+    activeMissions,
+    incomingMissions,
+  };
+
+  res.json(payload);
+});
+
+// ================= BASE ACTIONS =================
+
+app.post('/api/bases/:baseId/rename', authMiddleware, (req: AuthRequest, res) => {
+  const baseId = Number(req.params.baseId);
+  const name = String(req.body?.name || '').trim();
+  if (name.length < 2 || name.length > 28) {
+    res.status(400).json({ error: 'Stützpunktname muss 2–28 Zeichen lang sein.' });
+    return;
+  }
+  const result = db
+    .prepare('UPDATE bases SET name = ? WHERE id = ? AND user_id = ?')
+    .run(name, baseId, req.userId!);
+  if (result.changes === 0) {
+    res.status(404).json({ error: 'Stützpunkt nicht gefunden.' });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+app.post('/api/bases/:baseId/build', authMiddleware, (req: AuthRequest, res) => {
+  const now = Date.now();
+  const baseId = Number(req.params.baseId);
+  const buildingId = String(req.body?.buildingId || '') as BuildingId;
+
+  if (!(buildingId in BUILDINGS)) {
+    res.status(400).json({ error: 'Unbekanntes Gebäude.' });
+    return;
+  }
+
+  const base = syncBase(baseId, now);
+  if (!base || base.userId !== req.userId) {
+    res.status(404).json({ error: 'Stützpunkt nicht gefunden.' });
+    return;
+  }
+
+  if (base.buildQueue) {
+    res.status(409).json({ error: 'In diesem Stützpunkt läuft bereits ein Bauauftrag.' });
+    return;
+  }
+
+  const research = getUserResearch(req.userId!);
+  const check = checkPrerequisites(BUILDINGS[buildingId].prereq, base.buildings, research);
+  if (!check.met) {
+    res.status(400).json({ error: `Voraussetzungen fehlen: ${check.missing.join(', ')}` });
+    return;
+  }
+
+  const targetLevel = (base.buildings[buildingId] || 0) + 1;
+  const cost = getBuildingCost(buildingId, targetLevel);
+
+  if (
+    base.resources.steel < cost.steel ||
+    base.resources.munition < cost.munition ||
+    base.resources.fuel < cost.fuel
+  ) {
+    res.status(400).json({ error: 'Nicht genügend Rohstoffe für diesen Ausbau.' });
+    return;
+  }
+
+  const durationSec = getBuildingDurationSec(buildingId, targetLevel, base.buildings.hq);
+  const endsAt = now + durationSec * 1000;
+
+  db.prepare('UPDATE bases SET steel = steel - ?, munition = munition - ?, fuel = fuel - ? WHERE id = ?').run(
+    cost.steel,
+    cost.munition,
+    cost.fuel,
+    baseId
+  );
+
+  db.prepare(
+    'INSERT INTO build_queue (base_id, building_id, target_level, started_at, ends_at) VALUES (?, ?, ?, ?, ?)'
+  ).run(baseId, buildingId, targetLevel, now, endsAt);
+
+  res.json({ ok: true, endsAt, durationSec });
+});
+
+app.post('/api/bases/:baseId/build/cancel', authMiddleware, (req: AuthRequest, res) => {
+  const now = Date.now();
+  const baseId = Number(req.params.baseId);
+  const base = syncBase(baseId, now);
+  if (!base || base.userId !== req.userId) {
+    res.status(404).json({ error: 'Stützpunkt nicht gefunden.' });
+    return;
+  }
+  if (!base.buildQueue) {
+    res.status(400).json({ error: 'Kein laufender Bauauftrag vorhanden.' });
+    return;
+  }
+  const cost = getBuildingCost(base.buildQueue.buildingId, base.buildQueue.targetLevel);
+  db.prepare('DELETE FROM build_queue WHERE id = ?').run(base.buildQueue.id);
+  db.prepare('UPDATE bases SET steel = steel + ?, munition = munition + ?, fuel = fuel + ? WHERE id = ?').run(
+    cost.steel,
+    cost.munition,
+    cost.fuel,
+    baseId
+  );
+  res.json({ ok: true });
+});
+
+app.post('/api/bases/:baseId/research', authMiddleware, (req: AuthRequest, res) => {
+  const now = Date.now();
+  const baseId = Number(req.params.baseId);
+  const researchId = String(req.body?.researchId || '') as ResearchId;
+
+  if (!(researchId in RESEARCH)) {
+    res.status(400).json({ error: 'Unbekannte Forschung.' });
+    return;
+  }
+
+  const base = syncBase(baseId, now);
+  if (!base || base.userId !== req.userId) {
+    res.status(404).json({ error: 'Stützpunkt nicht gefunden.' });
+    return;
+  }
+
+  const { levels, queue } = syncUserResearch(req.userId!, now);
+  if (queue) {
+    res.status(409).json({ error: 'Es läuft bereits eine aktive Forschung.' });
+    return;
+  }
+
+  const check = checkPrerequisites(RESEARCH[researchId].prereq, base.buildings, levels);
+  if (!check.met) {
+    res.status(400).json({ error: `Voraussetzungen fehlen: ${check.missing.join(', ')}` });
+    return;
+  }
+
+  const targetLevel = (levels[researchId] || 0) + 1;
+  const cost = getResearchCost(researchId, targetLevel);
+
+  if (
+    base.resources.steel < cost.steel ||
+    base.resources.munition < cost.munition ||
+    base.resources.fuel < cost.fuel
+  ) {
+    res.status(400).json({ error: 'Nicht genügend Rohstoffe für diese Forschung.' });
+    return;
+  }
+
+  const durationSec = getResearchDurationSec(researchId, targetLevel, base.buildings.research_lab);
+  const endsAt = now + durationSec * 1000;
+
+  db.prepare('UPDATE bases SET steel = steel - ?, munition = munition - ?, fuel = fuel - ? WHERE id = ?').run(
+    cost.steel,
+    cost.munition,
+    cost.fuel,
+    baseId
+  );
+
+  db.prepare(
+    'INSERT INTO research_queue (user_id, base_id, research_id, target_level, started_at, ends_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(req.userId!, baseId, researchId, targetLevel, now, endsAt);
+
+  res.json({ ok: true, endsAt, durationSec });
+});
+
+app.post('/api/bases/:baseId/produce', authMiddleware, (req: AuthRequest, res) => {
+  const now = Date.now();
+  const baseId = Number(req.params.baseId);
+  const entityType = req.body?.entityType === 'defense' ? 'defense' : 'unit';
+  const entityId = String(req.body?.entityId || '') as CombatEntityId;
+  const count = Math.floor(Number(req.body?.count || 0));
+
+  if (count < 1 || count > 500) {
+    res.status(400).json({ error: 'Anzahl muss zwischen 1 und 500 liegen.' });
+    return;
+  }
+
+  const def =
+    entityType === 'unit'
+      ? UNITS[entityId as UnitId]
+      : DEFENSES[entityId as DefenseId];
+
+  if (!def) {
+    res.status(400).json({ error: 'Unbekannte Einheit oder Verteidigungsanlage.' });
+    return;
+  }
+
+  const base = syncBase(baseId, now);
+  if (!base || base.userId !== req.userId) {
+    res.status(404).json({ error: 'Stützpunkt nicht gefunden.' });
+    return;
+  }
+
+  const research = getUserResearch(req.userId!);
+  const check = checkPrerequisites(def.prereq, base.buildings, research);
+  if (!check.met) {
+    res.status(400).json({ error: `Voraussetzungen fehlen: ${check.missing.join(', ')}` });
+    return;
+  }
+
+  const totalCost: Resources = {
+    steel: def.cost.steel * count,
+    munition: def.cost.munition * count,
+    fuel: def.cost.fuel * count,
+  };
+
+  if (
+    base.resources.steel < totalCost.steel ||
+    base.resources.munition < totalCost.munition ||
+    base.resources.fuel < totalCost.fuel
+  ) {
+    res.status(400).json({ error: 'Nicht genügend Rohstoffe für diesen Produktionsauftrag.' });
+    return;
+  }
+
+  const unitDurationSec = getUnitDurationSec(
+    entityId,
+    base.buildings.tank_works,
+    base.buildings.airfield
+  );
+
+  // Compute start time after existing queue tail
+  let queueEnd = now;
+  for (const item of base.unitQueue) {
+    const itemFinish = item.nextEndsAt + (item.count - 1) * item.unitDurationSec * 1000;
+    if (itemFinish > queueEnd) queueEnd = itemFinish;
+  }
+
+  const nextEndsAt = queueEnd + unitDurationSec * 1000;
+
+  db.prepare('UPDATE bases SET steel = steel - ?, munition = munition - ?, fuel = fuel - ? WHERE id = ?').run(
+    totalCost.steel,
+    totalCost.munition,
+    totalCost.fuel,
+    baseId
+  );
+
+  db.prepare(
+    `INSERT INTO unit_queue (base_id, entity_type, entity_id, count, unit_duration_sec, started_at, next_ends_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(baseId, entityType, entityId, count, unitDurationSec, queueEnd, nextEndsAt);
+
+  res.json({ ok: true, unitDurationSec });
+});
+
+// ================= SECTORS =================
+
+app.get('/api/sectors/:sector', authMiddleware, (req: AuthRequest, res) => {
+  const sector = Number(req.params.sector);
+  if (!Number.isInteger(sector) || sector < 1 || sector > MAX_SECTORS) {
+    res.status(400).json({ error: `Sektor muss zwischen 1 und ${MAX_SECTORS} liegen.` });
+    return;
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT b.id, b.name, b.position, b.user_id, u.username, u.is_ai, u.ai_difficulty, u.total_points,
+              a.tag as alliance_tag
+       FROM bases b
+       JOIN users u ON u.id = b.user_id
+       LEFT JOIN alliances a ON a.id = u.alliance_id
+       WHERE b.sector = ?`
+    )
+    .all(sector) as Array<{
+    id: number;
+    name: string;
+    position: number;
+    user_id: number;
+    username: string;
+    is_ai: number;
+    ai_difficulty: string | null;
+    total_points: number;
+    alliance_tag: string | null;
+  }>;
+
+  const byPos = new Map(rows.map((r) => [r.position, r]));
+  const slots: SectorSlot[] = [];
+
+  for (let pos = 1; pos <= POSITIONS_PER_SECTOR; pos++) {
+    const r = byPos.get(pos);
+    if (r) {
+      slots.push({
+        sector,
+        position: pos,
+        baseId: r.id,
+        baseName: r.name,
+        ownerName: r.username,
+        ownerId: r.user_id,
+        allianceTag: r.alliance_tag,
+        isOnline: r.is_ai === 0 && isUserOnline(r.user_id),
+        isAi: r.is_ai === 1,
+        isOwn: r.user_id === req.userId,
+        aiDifficulty: r.ai_difficulty || undefined,
+        points: r.total_points,
+      });
+    } else {
+      slots.push({
+        sector,
+        position: pos,
+        baseId: null,
+        baseName: null,
+        ownerName: null,
+        ownerId: null,
+        isAi: false,
+        isOwn: false,
+      });
+    }
+  }
+
+  res.json({ sector, maxSectors: MAX_SECTORS, slots });
+});
+
+// ================= MISSIONS =================
+
+app.post('/api/missions', authMiddleware, (req: AuthRequest, res) => {
+  const now = Date.now();
+  processDueMissions(now);
+
+  const originBaseId = Number(req.body?.originBaseId);
+  const targetSector = Number(req.body?.targetSector);
+  const targetPosition = Number(req.body?.targetPosition);
+  const missionType = String(req.body?.missionType || '') as MissionType;
+  const rawUnits = (req.body?.units || {}) as Partial<Record<UnitId, number>>;
+  const rawCargo = (req.body?.cargo || { steel: 0, munition: 0, fuel: 0 }) as Partial<Resources>;
+
+  if (!['spy', 'attack', 'transport', 'deploy', 'colonize'].includes(missionType)) {
+    res.status(400).json({ error: 'Ungültiger Missionstyp.' });
+    return;
+  }
+
+  if (
+    !Number.isInteger(targetSector) ||
+    targetSector < 1 ||
+    targetSector > MAX_SECTORS ||
+    !Number.isInteger(targetPosition) ||
+    targetPosition < 1 ||
+    targetPosition > POSITIONS_PER_SECTOR
+  ) {
+    res.status(400).json({ error: 'Ungültige Zielkoordinaten.' });
+    return;
+  }
+
+  const base = syncBase(originBaseId, now);
+  if (!base || base.userId !== req.userId) {
+    res.status(404).json({ error: 'Ausgangsstützpunkt nicht gefunden.' });
+    return;
+  }
+
+  if (base.sector === targetSector && base.position === targetPosition) {
+    res.status(400).json({ error: 'Zielkoordinaten dürfen nicht identisch mit dem Ausgangsstützpunkt sein.' });
+    return;
+  }
+
+  const research = getUserResearch(req.userId!);
+  const maxSlots = getMaxSimultaneousMissions(research.logistics);
+  const activeCount = (
+    db.prepare('SELECT COUNT(*) as c FROM missions WHERE user_id = ?').get(req.userId!) as {
+      c: number;
+    }
+  ).c;
+
+  if (activeCount >= maxSlots) {
+    res.status(409).json({
+      error: `Maximale Anzahl gleichzeitiger Marschverbände (${maxSlots}) erreicht. Erforsche Logistik für weitere Verbände.`,
+    });
+    return;
+  }
+
+  // Validate units
+  const unitsToSend: Partial<Record<UnitId, number>> = {};
+  let totalUnitCount = 0;
+  for (const [uId, val] of Object.entries(rawUnits) as [UnitId, number][]) {
+    const cnt = Math.floor(Number(val || 0));
+    if (cnt <= 0) continue;
+    if (!(uId in UNITS)) {
+      res.status(400).json({ error: `Unbekannte Einheit: ${uId}` });
+      return;
+    }
+    if ((base.units[uId] || 0) < cnt) {
+      res.status(400).json({ error: `Nicht genügend ${UNITS[uId].name} im Stützpunkt stationiert.` });
+      return;
+    }
+    unitsToSend[uId] = cnt;
+    totalUnitCount += cnt;
+  }
+
+  if (totalUnitCount === 0) {
+    res.status(400).json({ error: 'Mindestens eine Einheit muss entsandt werden.' });
+    return;
+  }
+
+  if (missionType === 'spy' && !(unitsToSend.scout_car && unitsToSend.scout_car > 0)) {
+    res.status(400).json({ error: 'Für Aufklärung muss mindestens ein Spähwagen mitgeführt werden.' });
+    return;
+  }
+
+  if (missionType === 'colonize') {
+    const maxBases = getMaxBases(research.colonization);
+    const currentBases = (
+      db.prepare('SELECT COUNT(*) as c FROM bases WHERE user_id = ?').get(req.userId!) as { c: number }
+    ).c;
+    if (currentBases >= maxBases) {
+      res.status(400).json({
+        error: `Stützpunkt-Limit (${maxBases}) erreicht. Erforsche Logistik-Kolonisierung für weitere Stützpunkte.`,
+      });
+      return;
+    }
+    const occupied = db
+      .prepare('SELECT id FROM bases WHERE sector = ? AND position = ?')
+      .get(targetSector, targetPosition);
+    if (occupied) {
+      res.status(400).json({ error: 'Diese Sektorposition ist bereits besetzt.' });
+      return;
+    }
+  }
+
+  const travel = getFleetTravelStats(
+    unitsToSend,
+    base.sector,
+    base.position,
+    targetSector,
+    targetPosition,
+    research.engine_tech
+  );
+
+  const cargo: Resources = {
+    steel: Math.max(0, Math.floor(Number(rawCargo.steel || 0))),
+    munition: Math.max(0, Math.floor(Number(rawCargo.munition || 0))),
+    fuel: Math.max(0, Math.floor(Number(rawCargo.fuel || 0))),
+  };
+
+  if (cargo.steel + cargo.munition + cargo.fuel > travel.cargoCapacity) {
+    res.status(400).json({ error: 'Ladekapazität des Verbands überschritten.' });
+    return;
+  }
+
+  if (
+    base.resources.steel < cargo.steel ||
+    base.resources.munition < cargo.munition ||
+    base.resources.fuel < cargo.fuel + travel.fuelCost
+  ) {
+    res.status(400).json({
+      error: `Nicht genügend Rohstoffe oder Treibstoff (benötigt ${travel.fuelCost} Treibstoff für den Marsch).`,
+    });
+    return;
+  }
+
+  // Deduct units, cargo, and fuel
+  const remainingUnits = { ...base.units };
+  for (const [uId, cnt] of Object.entries(unitsToSend) as [UnitId, number][]) {
+    remainingUnits[uId] = Math.max(0, (remainingUnits[uId] || 0) - cnt);
+  }
+
+  db.prepare(
+    'UPDATE bases SET steel = steel - ?, munition = munition - ?, fuel = fuel - ?, units_json = ? WHERE id = ?'
+  ).run(
+    cargo.steel,
+    cargo.munition,
+    cargo.fuel + travel.fuelCost,
+    JSON.stringify(remainingUnits),
+    originBaseId
+  );
+
+  const arrivesAt = now + travel.durationSec * 1000;
+  const info = db
+    .prepare(
+      `INSERT INTO missions (user_id, origin_base_id, target_sector, target_position, mission_type, units_json, cargo_json, departed_at, arrives_at, returns_at, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'outbound')`
+    )
+    .run(
+      req.userId!,
+      originBaseId,
+      targetSector,
+      targetPosition,
+      missionType,
+      JSON.stringify(unitsToSend),
+      JSON.stringify(cargo),
+      now,
+      arrivesAt
+    );
+
+  // Push real-time radar alert if targeting another human player
+  const targetBase = db
+    .prepare('SELECT b.user_id, u.is_ai FROM bases b JOIN users u ON u.id = b.user_id WHERE b.sector = ? AND b.position = ?')
+    .get(targetSector, targetPosition) as { user_id: number; is_ai: number } | undefined;
+  if (targetBase && targetBase.is_ai === 0 && targetBase.user_id !== req.userId) {
+    notifyUser(targetBase.user_id, 'incoming', {
+      missionType,
+      from: req.username,
+      targetSector,
+      targetPosition,
+      arrivesAt,
+    });
+  }
+
+  res.json({ ok: true, missionId: Number(info.lastInsertRowid), arrivesAt, durationSec: travel.durationSec });
+});
+
+app.post('/api/missions/:id/recall', authMiddleware, (req: AuthRequest, res) => {
+  const now = Date.now();
+  processDueMissions(now);
+  const id = Number(req.params.id);
+
+  const m = db
+    .prepare('SELECT * FROM missions WHERE id = ? AND user_id = ?')
+    .get(id, req.userId!) as
+    | { id: number; status: string; departed_at: number; arrives_at: number }
+    | undefined;
+
+  if (!m) {
+    res.status(404).json({ error: 'Marschverband nicht gefunden.' });
+    return;
+  }
+  if (m.status !== 'outbound') {
+    res.status(400).json({ error: 'Verband befindet sich bereits auf dem Rückmarsch.' });
+    return;
+  }
+
+  const elapsed = Math.max(3000, now - m.departed_at);
+  const returnsAt = now + elapsed;
+  db.prepare("UPDATE missions SET status = 'returning', returns_at = ? WHERE id = ?").run(
+    returnsAt,
+    id
+  );
+  res.json({ ok: true, returnsAt });
+});
+
+// ================= MESSAGES =================
+
+app.get('/api/messages', authMiddleware, (req: AuthRequest, res) => {
+  processDueMissions(Date.now());
+  const rows = db
+    .prepare('SELECT * FROM messages WHERE user_id = ? ORDER BY created_at DESC LIMIT 60')
+    .all(req.userId!) as Array<{
+    id: number;
+    type: 'combat' | 'spy' | 'transport' | 'system' | 'diplomacy';
+    title: string;
+    body: string;
+    data_json: string | null;
+    is_read: number;
+    created_at: number;
+  }>;
+
+  const messages: GameMessage[] = rows.map((r) => ({
+    id: r.id,
+    type: r.type,
+    title: r.title,
+    body: r.body,
+    data: r.data_json ? JSON.parse(r.data_json) : null,
+    isRead: r.is_read === 1,
+    createdAt: r.created_at,
+  }));
+
+  res.json({ messages });
+});
+
+app.post('/api/messages/:id/read', authMiddleware, (req: AuthRequest, res) => {
+  db.prepare('UPDATE messages SET is_read = 1 WHERE id = ? AND user_id = ?').run(
+    Number(req.params.id),
+    req.userId!
+  );
+  res.json({ ok: true });
+});
+
+app.post('/api/messages/read-all', authMiddleware, (req: AuthRequest, res) => {
+  db.prepare('UPDATE messages SET is_read = 1 WHERE user_id = ?').run(req.userId!);
+  res.json({ ok: true });
+});
+
+app.post('/api/messages/send', authMiddleware, (req: AuthRequest, res) => {
+  const recipientName = String(req.body?.recipient || '').trim();
+  const subject = String(req.body?.subject || '').trim() || 'Direkt-Funkspruch';
+  const body = String(req.body?.body || '').trim();
+
+  if (!recipientName || !body) {
+    res.status(400).json({ error: 'Empfänger und Nachrichtentext sind erforderlich.' });
+    return;
+  }
+  if (body.length > 1000) {
+    res.status(400).json({ error: 'Nachricht darf maximal 1.000 Zeichen lang sein.' });
+    return;
+  }
+
+  const target = db
+    .prepare('SELECT id, username, is_ai FROM users WHERE LOWER(username) = LOWER(?)')
+    .get(recipientName) as { id: number; username: string; is_ai: number } | undefined;
+
+  if (!target || target.is_ai === 1) {
+    res.status(404).json({ error: 'Kommandant nicht gefunden (KI-Stützpunkte empfangen keine Funksprüche).' });
+    return;
+  }
+  if (target.id === req.userId) {
+    res.status(400).json({ error: 'Du kannst dir selbst keinen Funkspruch senden.' });
+    return;
+  }
+
+  sendMessage(
+    target.id,
+    'diplomacy',
+    `Funkspruch von ${req.username}: ${subject.slice(0, 60)}`,
+    body,
+    { from: req.username, fromUserId: req.userId }
+  );
+
+  res.json({ ok: true });
+});
+
+// ================= REAL-TIME SSE, CHAT & ALLIANCES =================
+
+app.get('/api/events', (req, res) => {
+  const token = String(req.query.token || '').trim();
+  const row = db
+    .prepare('SELECT user_id FROM sessions WHERE token = ?')
+    .get(token) as { user_id: number } | undefined;
+
+  if (!row) {
+    res.status(401).end();
+    return;
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  const cleanup = registerSseClient(row.user_id, res);
+  req.on('close', cleanup);
+});
+
+app.get('/api/chat', authMiddleware, (req: AuthRequest, res) => {
+  const channel = req.query.channel === 'alliance' ? 'alliance' : 'global';
+  if (channel === 'alliance') {
+    const user = db
+      .prepare('SELECT alliance_id FROM users WHERE id = ?')
+      .get(req.userId!) as { alliance_id: number | null } | undefined;
+    if (!user?.alliance_id) {
+      res.json({ messages: [] });
+      return;
+    }
+    const rows = db
+      .prepare(
+        `SELECT * FROM chat_messages
+         WHERE channel = 'alliance' AND alliance_id = ?
+         ORDER BY created_at DESC LIMIT 60`
+      )
+      .all(user.alliance_id) as Array<{
+      id: number;
+      channel: 'global' | 'alliance';
+      alliance_id: number | null;
+      user_id: number;
+      username: string;
+      alliance_tag: string | null;
+      body: string;
+      created_at: number;
+    }>;
+    const messages: ChatMessage[] = rows.reverse().map((r) => ({
+      id: r.id,
+      channel: r.channel,
+      allianceId: r.alliance_id,
+      userId: r.user_id,
+      username: r.username,
+      allianceTag: r.alliance_tag,
+      body: r.body,
+      createdAt: r.created_at,
+    }));
+    res.json({ messages });
+    return;
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT * FROM chat_messages
+       WHERE channel = 'global'
+       ORDER BY created_at DESC LIMIT 60`
+    )
+    .all() as Array<{
+    id: number;
+    channel: 'global' | 'alliance';
+    alliance_id: number | null;
+    user_id: number;
+    username: string;
+    alliance_tag: string | null;
+    body: string;
+    created_at: number;
+  }>;
+  const messages: ChatMessage[] = rows.reverse().map((r) => ({
+    id: r.id,
+    channel: r.channel,
+    allianceId: r.alliance_id,
+    userId: r.user_id,
+    username: r.username,
+    allianceTag: r.alliance_tag,
+    body: r.body,
+    createdAt: r.created_at,
+  }));
+  res.json({ messages });
+});
+
+app.post('/api/chat', authMiddleware, (req: AuthRequest, res) => {
+  const channel = req.body?.channel === 'alliance' ? 'alliance' : 'global';
+  const body = String(req.body?.body || '').trim();
+  if (!body || body.length > 400) {
+    res.status(400).json({ error: 'Funknachricht muss 1–400 Zeichen lang sein.' });
+    return;
+  }
+
+  const user = db
+    .prepare(
+      `SELECT u.id, u.username, u.alliance_id, a.tag as alliance_tag
+       FROM users u LEFT JOIN alliances a ON a.id = u.alliance_id
+       WHERE u.id = ?`
+    )
+    .get(req.userId!) as {
+    id: number;
+    username: string;
+    alliance_id: number | null;
+    alliance_tag: string | null;
+  };
+
+  if (channel === 'alliance' && !user.alliance_id) {
+    res.status(400).json({ error: 'Du bist in keiner Allianz.' });
+    return;
+  }
+
+  const now = Date.now();
+  const allianceId = channel === 'alliance' ? user.alliance_id : null;
+  const info = db
+    .prepare(
+      `INSERT INTO chat_messages (channel, alliance_id, user_id, username, alliance_tag, body, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(channel, allianceId, user.id, user.username, user.alliance_tag, body, now);
+
+  const msg: ChatMessage = {
+    id: Number(info.lastInsertRowid),
+    channel,
+    allianceId,
+    userId: user.id,
+    username: user.username,
+    allianceTag: user.alliance_tag,
+    body,
+    createdAt: now,
+  };
+
+  broadcastChatMessage(msg);
+  res.json({ ok: true, message: msg });
+});
+
+app.get('/api/alliances', authMiddleware, (req: AuthRequest, res) => {
+  const rows = db
+    .prepare(
+      `SELECT a.id, a.tag, a.name, a.description, a.leader_id,
+              COUNT(u.id) as member_count,
+              COALESCE(SUM(u.total_points), 0) as total_points
+       FROM alliances a
+       LEFT JOIN users u ON u.alliance_id = a.id
+       GROUP BY a.id
+       ORDER BY total_points DESC, a.id ASC`
+    )
+    .all() as Array<{
+    id: number;
+    tag: string;
+    name: string;
+    description: string;
+    leader_id: number;
+    member_count: number;
+    total_points: number;
+  }>;
+
+  const user = db
+    .prepare('SELECT alliance_id FROM users WHERE id = ?')
+    .get(req.userId!) as { alliance_id: number | null } | undefined;
+
+  const alliances: AllianceInfo[] = rows.map((r) => {
+    const entry: AllianceInfo = {
+      id: r.id,
+      tag: r.tag,
+      name: r.name,
+      description: r.description,
+      leaderId: r.leader_id,
+      memberCount: r.member_count,
+      totalPoints: r.total_points,
+    };
+    if (user?.alliance_id === r.id) {
+      const mRows = db
+        .prepare('SELECT id, username, total_points FROM users WHERE alliance_id = ? ORDER BY total_points DESC')
+        .all(r.id) as Array<{ id: number; username: string; total_points: number }>;
+      entry.members = mRows.map<AllianceMember>((m) => ({
+        userId: m.id,
+        username: m.username,
+        points: m.total_points,
+        isLeader: m.id === r.leader_id,
+        isOnline: isUserOnline(m.id),
+      }));
+    }
+    return entry;
+  });
+
+  res.json({ alliances, myAllianceId: user?.alliance_id ?? null });
+});
+
+app.post('/api/alliances', authMiddleware, (req: AuthRequest, res) => {
+  const tag = String(req.body?.tag || '').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+  const name = String(req.body?.name || '').trim();
+  const description = String(req.body?.description || '').trim().slice(0, 240);
+
+  if (tag.length < 2 || tag.length > 5) {
+    res.status(400).json({ error: 'Allianz-Kürzel (Tag) muss 2–5 Zeichen lang sein (A-Z, 0-9).' });
+    return;
+  }
+  if (name.length < 3 || name.length > 28) {
+    res.status(400).json({ error: 'Allianzname muss 3–28 Zeichen lang sein.' });
+    return;
+  }
+
+  const current = db
+    .prepare('SELECT alliance_id FROM users WHERE id = ?')
+    .get(req.userId!) as { alliance_id: number | null };
+  if (current.alliance_id) {
+    res.status(400).json({ error: 'Verlasse zuerst deine aktuelle Allianz.' });
+    return;
+  }
+
+  const dup = db
+    .prepare('SELECT id FROM alliances WHERE LOWER(tag) = LOWER(?) OR LOWER(name) = LOWER(?)')
+    .get(tag, name);
+  if (dup) {
+    res.status(409).json({ error: 'Allianz-Kürzel oder Name bereits vergeben.' });
+    return;
+  }
+
+  const info = db
+    .prepare(
+      'INSERT INTO alliances (tag, name, description, leader_id, created_at) VALUES (?, ?, ?, ?, ?)'
+    )
+    .run(tag, name, description, req.userId!, Date.now());
+  const allianceId = Number(info.lastInsertRowid);
+  db.prepare('UPDATE users SET alliance_id = ? WHERE id = ?').run(allianceId, req.userId!);
+
+  res.json({ ok: true, allianceId });
+});
+
+app.post('/api/alliances/:id/join', authMiddleware, (req: AuthRequest, res) => {
+  const allianceId = Number(req.params.id);
+  const exists = db.prepare('SELECT id FROM alliances WHERE id = ?').get(allianceId);
+  if (!exists) {
+    res.status(404).json({ error: 'Allianz nicht gefunden.' });
+    return;
+  }
+  db.prepare('UPDATE users SET alliance_id = ? WHERE id = ?').run(allianceId, req.userId!);
+  res.json({ ok: true });
+});
+
+app.post('/api/alliances/leave', authMiddleware, (req: AuthRequest, res) => {
+  const user = db
+    .prepare('SELECT alliance_id FROM users WHERE id = ?')
+    .get(req.userId!) as { alliance_id: number | null };
+  if (!user.alliance_id) {
+    res.status(400).json({ error: 'Du bist in keiner Allianz.' });
+    return;
+  }
+  const oldId = user.alliance_id;
+  db.prepare('UPDATE users SET alliance_id = NULL WHERE id = ?').run(req.userId!);
+
+  const remaining = (
+    db.prepare('SELECT COUNT(*) as c FROM users WHERE alliance_id = ?').get(oldId) as { c: number }
+  ).c;
+  if (remaining === 0) {
+    db.prepare('DELETE FROM alliances WHERE id = ?').run(oldId);
+  }
+  res.json({ ok: true });
+});
+
+// ================= HIGHSCORE =================
+
+app.get('/api/highscore', authMiddleware, (_req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT u.id, u.username, u.is_ai, u.building_points, u.research_points, u.military_points, u.total_points,
+              a.tag as alliance_tag,
+              (SELECT COUNT(*) FROM bases b WHERE b.user_id = u.id) as bases_count
+       FROM users u
+       LEFT JOIN alliances a ON a.id = u.alliance_id
+       ORDER BY u.total_points DESC, u.id ASC`
+    )
+    .all() as Array<{
+    id: number;
+    username: string;
+    is_ai: number;
+    building_points: number;
+    research_points: number;
+    military_points: number;
+    total_points: number;
+    alliance_tag: string | null;
+    bases_count: number;
+  }>;
+
+  const entries: HighscoreEntry[] = rows.map((r, idx) => ({
+    rank: idx + 1,
+    userId: r.id,
+    username: r.username,
+    allianceTag: r.alliance_tag,
+    isOnline: r.is_ai === 0 && isUserOnline(r.id),
+    isAi: r.is_ai === 1,
+    basesCount: r.bases_count,
+    buildingPoints: r.building_points,
+    researchPoints: r.research_points,
+    militaryPoints: r.military_points,
+    totalPoints: r.total_points,
+  }));
+
+  res.json({ entries });
+});
+
+// Serve built frontend if present
+const clientDist = path.resolve(process.cwd(), 'dist/client');
+if (fs.existsSync(clientDist)) {
+  app.use(express.static(clientDist));
+  app.get('/{*path}', (_req, res) => {
+    res.sendFile(path.join(clientDist, 'index.html'));
+  });
+}
+
+// Background ticker every 3 seconds to resolve missions cleanly even between client polls
+setInterval(() => {
+  try {
+    processDueMissions(Date.now());
+  } catch (err) {
+    console.error('Mission tick error:', err);
+  }
+}, 3000);
+
+app.listen(PORT, () => {
+  console.log(`FRONTKOMMANDO 1942 Server aktiv auf http://localhost:${PORT}`);
+});
