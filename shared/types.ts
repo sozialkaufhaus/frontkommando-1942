@@ -18,6 +18,7 @@ export type BuildingId =
   | 'hq'
   | 'tank_works'
   | 'airfield'
+  | 'shipyard'
   | 'research_lab'
   | 'radar_station';
 
@@ -29,15 +30,93 @@ export type ResearchId =
   | 'logistics'
   | 'colonization';
 
-export type UnitId =
-  | 'scout_car'
-  | 'truck_convoy'
+export type UnitCategory =
   | 'infantry'
-  | 'light_tank'
-  | 'heavy_tank'
+  | 'support'
+  | 'armor'
   | 'artillery'
+  | 'air'
+  | 'naval';
+
+export type UnitSpecialRole =
+  | 'recon'
+  | 'anti_tank'
+  | 'anti_air'
+  | 'anti_bunker'
+  | 'medic'
+  | 'repair'
+  | 'minesweeper'
+  | 'air_support'
+  | 'submarine'
+  | 'engineer';
+
+export type UnitId =
+  // I. Infanterie & Spezialkräfte (1-15)
+  | 'infantry'
+  | 'elite_infantry'
+  | 'motorized_infantry'
+  | 'mechanized_infantry'
+  | 'tank_rider_infantry'
+  | 'light_infantry'
+  | 'mountain_troops'
+  | 'winter_troops'
+  | 'paratroopers'
+  | 'glider_infantry'
+  | 'marines'
+  | 'commandos'
+  | 'long_range_recon'
+  | 'sniper_team'
+  | 'militia'
+  // II. Pioniere, Panzerabwehr & Unterstützungswaffen (16-25)
+  | 'combat_engineers'
+  | 'assault_engineers'
+  | 'construction_engineers'
+  | 'bridge_engineers'
+  | 'heavy_mg_team'
+  | 'mortar_team'
+  | 'at_infantry'
+  | 'towed_at_gun'
+  | 'light_aa_crew'
+  | 'heavy_aa_crew'
+  // III. Panzer, Aufklärung & Gepanzerte Fahrzeuge (26-38)
+  | 'scout_car'
+  | 'armored_recon'
+  | 'light_tank'
+  | 'medium_tank'
+  | 'heavy_tank'
+  | 'super_heavy_tank'
+  | 'infantry_tank'
+  | 'assault_gun'
+  | 'light_tank_destroyer'
+  | 'heavy_tank_destroyer'
+  | 'flame_tank'
+  | 'minesweeper_tank'
+  | 'aa_tank'
+  // IV. Artillerie, Logistik & Kommando (39-47)
+  | 'artillery'
+  | 'heavy_artillery'
+  | 'sp_artillery'
+  | 'rocket_artillery'
+  | 'railway_gun'
+  | 'truck_convoy'
+  | 'recovery_team'
+  | 'medic_team'
+  | 'military_police'
+  // V. Luftstreitkräfte (48-54)
   | 'fighter'
-  | 'bomber';
+  | 'heavy_fighter'
+  | 'jet_fighter'
+  | 'ground_attacker'
+  | 'bomber'
+  | 'heavy_bomber'
+  | 'transport_plane'
+  // VI. Seestreitkräfte (55-60)
+  | 'destroyer'
+  | 'cruiser'
+  | 'battleship'
+  | 'carrier'
+  | 'submarine'
+  | 'patrol_boat';
 
 export type DefenseId =
   | 'mg_nest'
@@ -79,8 +158,10 @@ export interface ResearchDef {
 
 export interface UnitDef {
   id: UnitId;
+  archetypeNumber: number;
   name: string;
-  category: 'ground' | 'air';
+  factionNames: Record<FactionId, string>;
+  category: UnitCategory;
   description: string;
   cost: Resources;
   structure: number; // Panzerung / HP
@@ -89,6 +170,8 @@ export interface UnitDef {
   speed: number;
   cargo: number;
   fuelConsumption: number;
+  specialRole?: UnitSpecialRole;
+  specialLabel?: string;
   rapidfire?: Partial<Record<CombatEntityId, number>>;
   image: string;
   prereq?: Prerequisite;

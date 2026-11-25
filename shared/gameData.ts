@@ -8,9 +8,11 @@ import type {
   ResearchDef,
   ResearchId,
   Resources,
-  UnitDef,
   UnitId,
 } from './types';
+import { UNIT_CATEGORIES, UNIT_ORDER, UNITS } from './units60';
+
+export { UNIT_CATEGORIES, UNIT_ORDER, UNITS };
 
 // Game speed multiplier for crisp, responsive real-time gameplay
 export const GAME_SPEED = 12; // 12x classic OGame pace so builds/production feel brisk & engaging
@@ -105,6 +107,16 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     image: '/assets/bld-airfield.svg',
     prereq: { building: { hq: 3, tank_works: 2 } },
   },
+  shipyard: {
+    id: 'shipyard',
+    name: 'Marinewerft',
+    category: 'facility',
+    description: 'Kriegshafen und Trockendocks für den Bau von Zerstörern, Kreuzern, Schlachtschiffen, Trägern und U-Booten.',
+    baseCost: { steel: 800, munition: 450, fuel: 350 },
+    costFactor: 2.0,
+    image: '/assets/bld-shipyard.svg',
+    prereq: { building: { hq: 2 } },
+  },
   research_lab: {
     id: 'research_lab',
     name: 'Forschungszentrum',
@@ -136,6 +148,7 @@ export const BUILDING_ORDER: BuildingId[] = [
   'hq',
   'tank_works',
   'airfield',
+  'shipyard',
   'research_lab',
   'radar_station',
 ];
@@ -210,146 +223,6 @@ export const RESEARCH_ORDER: ResearchId[] = [
   'radio_intel',
   'logistics',
   'colonization',
-];
-
-export const UNITS: Record<UnitId, UnitDef> = {
-  scout_car: {
-    id: 'scout_car',
-    name: 'Spähwagen',
-    category: 'ground',
-    description: 'Leicht gepanzertes Aufklärungsfahrzeug. Extrem schnell, ideal für Spionagemissionen.',
-    cost: { steel: 400, munition: 600, fuel: 100 },
-    structure: 1000,
-    shield: 10,
-    attack: 20,
-    speed: 24000,
-    cargo: 200,
-    fuelConsumption: 5,
-    image: '/assets/unit-scout.jpg',
-    prereq: { building: { tank_works: 1 } },
-  },
-  truck_convoy: {
-    id: 'truck_convoy',
-    name: 'LKW-Konvoi',
-    category: 'ground',
-    description: 'Unbewaffneter Nachschubkonvoi mit enormer Ladekapazität für Beute und Rohstofftransporte.',
-    cost: { steel: 2000, munition: 2000, fuel: 0 },
-    structure: 4000,
-    shield: 20,
-    attack: 10,
-    speed: 8500,
-    cargo: 15000,
-    fuelConsumption: 20,
-    image: '/assets/unit-convoy.jpg',
-    prereq: { building: { tank_works: 1 }, research: { engine_tech: 1 } },
-  },
-  infantry: {
-    id: 'infantry',
-    name: 'Infanterie-Trupp',
-    category: 'ground',
-    description: 'Vielseitige Fronttruppe. Kostengünstig in Masse und wirksam gegen ungeschützte Geschütze.',
-    cost: { steel: 600, munition: 400, fuel: 50 },
-    structure: 1200,
-    shield: 15,
-    attack: 55,
-    speed: 6500,
-    cargo: 400,
-    fuelConsumption: 8,
-    rapidfire: { pak_gun: 2, artillery: 2 },
-    image: '/assets/unit-infantry.svg',
-    prereq: { building: { tank_works: 1 } },
-  },
-  light_tank: {
-    id: 'light_tank',
-    name: 'Leichter Panzer',
-    category: 'ground',
-    description: 'Schneller Durchbruchspanzer für Flankenstöße und schnelle Überfälle.',
-    cost: { steel: 3000, munition: 1000, fuel: 250 },
-    structure: 4000,
-    shield: 40,
-    attack: 160,
-    speed: 12500,
-    cargo: 1200,
-    fuelConsumption: 30,
-    rapidfire: { scout_car: 4, infantry: 3 },
-    image: '/assets/unit-light-tank.jpg',
-    prereq: { building: { tank_works: 2 }, research: { engine_tech: 2 } },
-  },
-  heavy_tank: {
-    id: 'heavy_tank',
-    name: 'Schwerer Panzer',
-    category: 'ground',
-    description: 'Das Rückgrat der Panzerwaffe. Enorme Panzerung und durchschlagskräftige Hauptkanone.',
-    cost: { steel: 10000, munition: 4500, fuel: 1500 },
-    structure: 16000,
-    shield: 180,
-    attack: 620,
-    speed: 7500,
-    cargo: 2500,
-    fuelConsumption: 90,
-    rapidfire: { light_tank: 3, mg_nest: 4, scout_car: 5 },
-    image: '/assets/unit-heavy-tank.svg',
-    prereq: { building: { tank_works: 4 }, research: { armor_tech: 3, weapons_tech: 2 } },
-  },
-  artillery: {
-    id: 'artillery',
-    name: 'Feldartillerie',
-    category: 'ground',
-    description: 'Schwere Haubitzenbatterie mit verheerender Wirkung gegen feindliche Stellungen und Bunker.',
-    cost: { steel: 7500, munition: 5500, fuel: 1000 },
-    structure: 9500,
-    shield: 60,
-    attack: 880,
-    speed: 5500,
-    cargo: 800,
-    fuelConsumption: 75,
-    rapidfire: { mg_nest: 6, pak_gun: 4, heavy_bunker: 3 },
-    image: '/assets/unit-artillery.svg',
-    prereq: { building: { tank_works: 3 }, research: { weapons_tech: 3 } },
-  },
-  fighter: {
-    id: 'fighter',
-    name: 'Jagdflugzeug',
-    category: 'air',
-    description: 'Hochgeschwindigkeits-Abfangjäger zur Sicherung der Lufthoheit gegen feindliche Bomber.',
-    cost: { steel: 4500, munition: 3500, fuel: 1200 },
-    structure: 6500,
-    shield: 75,
-    attack: 340,
-    speed: 28000,
-    cargo: 300,
-    fuelConsumption: 60,
-    rapidfire: { bomber: 4, scout_car: 4, truck_convoy: 3 },
-    image: '/assets/unit-fighter.svg',
-    prereq: { building: { airfield: 1 }, research: { engine_tech: 3 } },
-  },
-  bomber: {
-    id: 'bomber',
-    name: 'Bomber',
-    category: 'air',
-    description: 'Taktischer Zweimotor-Bomber für vernichtende Luftschläge gegen Panzer und Befestigungen.',
-    cost: { steel: 14000, munition: 9000, fuel: 4000 },
-    structure: 22000,
-    shield: 220,
-    attack: 1250,
-    speed: 18000,
-    cargo: 4000,
-    fuelConsumption: 160,
-    rapidfire: { mg_nest: 8, pak_gun: 6, heavy_bunker: 4, heavy_tank: 2 },
-    image: '/assets/unit-bomber.svg',
-    prereq: { building: { airfield: 3 }, research: { engine_tech: 4, weapons_tech: 4 } },
-  },
-};
-
-export const UNIT_ORDER: UnitId[] = [
-  'scout_car',
-  'truck_convoy',
-  'infantry',
-  'light_tank',
-  'heavy_tank',
-  'artillery',
-  'fighter',
-  'bomber',
 ];
 
 export const DEFENSES: Record<DefenseId, DefenseDef> = {
@@ -444,11 +317,17 @@ export function getResearchDurationSec(id: ResearchId, targetLevel: number, labL
   return Math.max(6, Math.floor(rawHours * 3600));
 }
 
-export function getUnitDurationSec(entityId: CombatEntityId, tankWorksLevel: number, airfieldLevel: number): number {
+export function getUnitDurationSec(
+  entityId: CombatEntityId,
+  tankWorksLevel: number,
+  airfieldLevel: number,
+  shipyardLevel = 0
+): number {
   const isUnit = entityId in UNITS;
   const def = isUnit ? UNITS[entityId as UnitId] : DEFENSES[entityId as DefenseId];
-  const isAir = isUnit && UNITS[entityId as UnitId].category === 'air';
-  const facilityLevel = isAir ? airfieldLevel : tankWorksLevel;
+  const cat = isUnit ? UNITS[entityId as UnitId].category : 'defense';
+  const facilityLevel =
+    cat === 'air' ? airfieldLevel : cat === 'naval' ? shipyardLevel : tankWorksLevel;
   const rawHours = (def.cost.steel + def.cost.munition) / (2500 * (1 + facilityLevel) * GAME_SPEED);
   return Math.max(2, Math.floor(rawHours * 3600));
 }

@@ -1,15 +1,23 @@
 import { useState } from 'react';
-import { Clock, Crosshair, Lock, Shield, Zap } from 'lucide-react';
+import { Clock, Crosshair, Lock, Search, Shield, Sparkles, Zap } from 'lucide-react';
 import {
   DEFENSES,
   DEFENSE_ORDER,
   UNITS,
+  UNIT_CATEGORIES,
   UNIT_ORDER,
   checkPrerequisites,
   getCombatEntityStats,
   getUnitDurationSec,
 } from '@shared/gameData';
-import type { CombatEntityId, DefenseId, GameStateResponse, Resources, UnitId } from '@shared/types';
+import type {
+  CombatEntityId,
+  DefenseId,
+  GameStateResponse,
+  Resources,
+  UnitCategory,
+  UnitId,
+} from '@shared/types';
 import { api, fmtDuration, fmtNum } from '../api';
 
 interface ProductionProps {
@@ -29,11 +37,29 @@ export function Production({
   onRefresh,
   onNotify,
 }: ProductionProps) {
-  const { activeBase, research } = state;
+  const { activeBase, research, user } = state;
   const [counts, setCounts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const [categoryFilter, setCategoryFilter] = useState<UnitCategory | 'all'>('all');
+  const [searchQuery, setSearchQuery] = useState('');
 
-  const ids: CombatEntityId[] = mode === 'unit' ? UNIT_ORDER : DEFENSE_ORDER;
+  const ids: CombatEntityId[] =
+    mode === 'unit'
+      ? UNIT_ORDER.filter((id) => {
+          const u = UNITS[id];
+          if (categoryFilter !== 'all' && u.category !== categoryFilter) return false;
+          if (searchQuery.trim()) {
+            const q = searchQuery.trim().toLowerCase();
+            const facName = (u.factionNames[user.faction] || '').toLowerCase();
+            return (
+              u.name.toLowerCase().includes(q) ||
+              facName.includes(q) ||
+              String(u.archetypeNumber) === q
+            );
+          }
+          return true;
+        })
+      : DEFENSE_ORDER;
 
   const getMaxAffordable = (id: CombatEntityId): number => {
     const cost = mode === 'unit' ? UNITS[id as UnitId].cost : DEFENSES[id as DefenseId].cost;
@@ -77,11 +103,44 @@ export function Production({
           </h2>
           <p className="text-xs text-stone-400 mt-0.5">
             Panzerwerk St. {activeBase.buildings.tank_works} • Flugplatz St.{' '}
-            {activeBase.buildings.airfield} • Waffentechnik +{research.weapons_tech * 10}% • Panzerung +
-            {research.armor_tech * 10}%
+            {activeBase.buildings.airfield} • Marinewerft St. {activeBase.buildings.shipyard || 0} •
+            Waffen +{research.weapons_tech * 10}% • Panz. +{research.armor_tech * 10}%
           </p>
         </div>
+
+        {mode === 'unit' && (
+          <div className="relative w-full sm:w-64">
+            <Search className="w-3.5 h-3.5 text-stone-500 absolute left-2.5 top-2.5" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Truppengattung oder Name suchen..."
+              className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-[#0d100e] border border-stone-700 text-xs text-white focus:border-amber-500 focus:outline-none"
+            />
+          </div>
+        )}
       </div>
+
+      {/* Category Filter Tabs for the 60 Unit Archetypes */}
+      {mode === 'unit' && (
+        <div className="flex flex-wrap gap-1.5">
+          {UNIT_CATEGORIES.map((cat) => (
+            <button
+              key={cat.id}
+              type="button"
+              onClick={() => setCategoryFilter(cat.id)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${
+                categoryFilter === cat.id
+                  ? 'bg-amber-600/25 border-amber-500 text-amber-200'
+                  : 'bg-[#121614] border-stone-800 text-stone-400 hover:text-stone-200'
+              }`}
+            >
+              {cat.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Production Queue Strip */}
       {activeBase.unitQueue.length > 0 && (
@@ -125,7 +184,8 @@ export function Production({
           const duration = getUnitDurationSec(
             id,
             activeBase.buildings.tank_works,
-            activeBase.buildings.airfield
+            activeBase.buildings.airfield,
+            activeBase.buildings.shipyard || 0
           );
           const maxAff = getMaxAffordable(id);
           const rawQty = counts[id] ?? '1';
@@ -133,13 +193,27 @@ export function Production({
 
           const effAttack = Math.round(def.attack * (1 + research.weapons_tech * 0.1));
           const effArmor = Math.round(def.structure * (1 + research.armor_tech * 0.1));
+          const displayTitle = uDef ? uDef.factionNames[user.faction] || uDef.name : def.name;
+          const catBadge = uDef
+            ? uDef.category === 'infantry'
+              ? 'Infanterie'
+              : uDef.category === 'support'
+                ? 'Pioniere / Pak'
+                : uDef.category === 'armor'
+                  ? 'Panzer'
+                  : uDef.category === 'artillery'
+                    ? 'Artillerie / Log.'
+                    : uDef.category === 'air'
+                      ? 'Luftwaffe'
+                      : 'Marine'
+            : null;
 
           return (
             <div key={id} className="ops-card rounded-xl overflow-hidden flex flex-col">
               <div className="relative h-36 bg-black/50">
                 <img
                   src={def.image}
-                  alt={def.name}
+                  alt={displayTitle}
                   className="w-full h-full object-cover opacity-85"
                 />
                 <div className="absolute inset-0 bg-gradient-to-t from-[#121614] via-transparent to-black/30" />
@@ -147,19 +221,29 @@ export function Production({
                   Bestand: {fmtNum(owned)}
                 </div>
                 {uDef && (
-                  <div className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded bg-black/70 border border-stone-600/60 text-[10px] uppercase tracking-wider text-stone-300">
-                    {uDef.category === 'air' ? 'Luftwaffe' : 'Heer'}
+                  <div className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded bg-black/75 border border-stone-600/60 text-[10px] uppercase tracking-wider text-stone-200">
+                    #{uDef.archetypeNumber} • {catBadge}
                   </div>
                 )}
-                <div className="absolute bottom-2.5 left-3 right-3">
-                  <div className="font-display text-base font-bold text-[#f3ebd8] leading-tight">
-                    {def.name}
+                <div className="absolute bottom-2 left-3 right-3">
+                  <div className="font-display text-sm sm:text-base font-bold text-[#f3ebd8] leading-tight">
+                    {displayTitle}
                   </div>
+                  {uDef && (
+                    <div className="text-[10px] text-amber-300/90 font-medium truncate">
+                      {uDef.name}
+                    </div>
+                  )}
                 </div>
               </div>
 
               <div className="p-3.5 flex-1 flex flex-col justify-between gap-3">
                 <div className="space-y-2.5">
+                  {uDef?.specialLabel && (
+                    <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-950/50 border border-emerald-600/40 text-[10px] font-semibold text-emerald-300">
+                      <Sparkles className="w-3 h-3" /> {uDef.specialLabel}
+                    </div>
+                  )}
                   <p className="text-xs text-stone-400 leading-relaxed">{def.description}</p>
 
                   {/* Combat Stats */}

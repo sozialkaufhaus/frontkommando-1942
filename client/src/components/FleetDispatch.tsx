@@ -40,6 +40,7 @@ export function FleetDispatch({
   const [selectedUnits, setSelectedUnits] = useState<Partial<Record<UnitId, number>>>({});
   const [cargo, setCargo] = useState<Resources>({ steel: 0, munition: 0, fuel: 0 });
   const [submitting, setSubmitting] = useState(false);
+  const [showEmptyUnits, setShowEmptyUnits] = useState(false);
 
   useEffect(() => {
     if (initialTarget) {
@@ -136,53 +137,70 @@ export function FleetDispatch({
       <div className="grid lg:grid-cols-3 gap-5">
         {/* Left: Unit Selection */}
         <div className="lg:col-span-2 ops-panel rounded-xl p-4 space-y-3">
-          <h3 className="text-xs uppercase tracking-[0.2em] text-amber-400 font-semibold">
-            1. Verband zusammenstellen
-          </h3>
-          <div className="grid sm:grid-cols-2 gap-2.5">
-            {UNIT_ORDER.map((id) => {
-              const def = UNITS[id];
-              const avail = activeBase.units[id] || 0;
-              const chosen = selectedUnits[id] || 0;
-              return (
-                <div
-                  key={id}
-                  className={`p-3 rounded-lg border flex items-center justify-between gap-2 ${
-                    avail > 0
-                      ? 'bg-black/45 border-stone-700/80'
-                      : 'bg-black/20 border-stone-800/50 opacity-50'
-                  }`}
-                >
-                  <div className="min-w-0">
-                    <div className="text-xs font-semibold text-[#f0e9d8] truncate">{def.name}</div>
-                    <div className="text-[11px] font-mono-num text-stone-400">
-                      Verfügbar: <span className="text-amber-300">{fmtNum(avail)}</span> • Lade:{' '}
-                      {fmtNum(def.cargo)}
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-xs uppercase tracking-[0.2em] text-amber-400 font-semibold">
+              1. Verband zusammenstellen
+            </h3>
+            <button
+              type="button"
+              onClick={() => setShowEmptyUnits((v) => !v)}
+              className="text-[11px] text-stone-400 hover:text-amber-300 cursor-pointer"
+            >
+              {showEmptyUnits ? 'Nur verfügbare zeigen' : 'Alle 60 Typen zeigen'}
+            </button>
+          </div>
+          <div className="grid sm:grid-cols-2 gap-2.5 max-h-[540px] overflow-y-auto pr-1">
+            {UNIT_ORDER.filter((id) => showEmptyUnits || (activeBase.units[id] || 0) > 0).map(
+              (id) => {
+                const def = UNITS[id];
+                const avail = activeBase.units[id] || 0;
+                const chosen = selectedUnits[id] || 0;
+                const displayName = def.factionNames[state.user.faction] || def.name;
+                return (
+                  <div
+                    key={id}
+                    className={`p-3 rounded-lg border flex items-center justify-between gap-2 ${
+                      avail > 0
+                        ? 'bg-black/45 border-stone-700/80'
+                        : 'bg-black/20 border-stone-800/50 opacity-50'
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-[#f0e9d8] truncate">
+                        {displayName}
+                      </div>
+                      <div className="text-[10px] text-stone-400 truncate">
+                        #{def.archetypeNumber} {def.name}
+                      </div>
+                      <div className="text-[11px] font-mono-num text-stone-400">
+                        Verfügbar: <span className="text-amber-300">{fmtNum(avail)}</span> • Lade:{' '}
+                        {fmtNum(def.cargo)}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <input
+                        type="number"
+                        min={0}
+                        max={avail}
+                        disabled={avail === 0}
+                        value={chosen || ''}
+                        placeholder="0"
+                        onChange={(e) => setUnitCount(id, Number(e.target.value))}
+                        className="w-16 px-2 py-1.5 rounded bg-[#0c0f0d] border border-stone-700 text-xs font-mono-num text-center text-white focus:border-amber-500 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        disabled={avail === 0}
+                        onClick={() => setUnitCount(id, avail)}
+                        className="px-2 py-1.5 rounded bg-stone-800 hover:bg-stone-700 text-[10px] font-mono-num text-amber-300 cursor-pointer disabled:opacity-30"
+                      >
+                        Alle
+                      </button>
                     </div>
                   </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <input
-                      type="number"
-                      min={0}
-                      max={avail}
-                      disabled={avail === 0}
-                      value={chosen || ''}
-                      placeholder="0"
-                      onChange={(e) => setUnitCount(id, Number(e.target.value))}
-                      className="w-16 px-2 py-1.5 rounded bg-[#0c0f0d] border border-stone-700 text-xs font-mono-num text-center text-white focus:border-amber-500 focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      disabled={avail === 0}
-                      onClick={() => setUnitCount(id, avail)}
-                      className="px-2 py-1.5 rounded bg-stone-800 hover:bg-stone-700 text-[10px] font-mono-num text-amber-300 cursor-pointer disabled:opacity-30"
-                    >
-                      Alle
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
+                );
+              }
+            )}
           </div>
         </div>
 

@@ -42,6 +42,7 @@ export function emptyBuildings(): Record<BuildingId, number> {
     hq: 1,
     tank_works: 0,
     airfield: 0,
+    shipyard: 0,
     research_lab: 0,
     radar_station: 0,
   };
@@ -59,16 +60,11 @@ export function emptyResearch(): Record<ResearchId, number> {
 }
 
 export function emptyUnits(): Record<UnitId, number> {
-  return {
-    scout_car: 0,
-    truck_convoy: 0,
-    infantry: 0,
-    light_tank: 0,
-    heavy_tank: 0,
-    artillery: 0,
-    fighter: 0,
-    bomber: 0,
-  };
+  const out = {} as Record<UnitId, number>;
+  for (const id of UNIT_ORDER) {
+    out[id] = 0;
+  }
+  return out;
 }
 
 export function emptyDefenses(): Record<DefenseId, number> {
@@ -705,7 +701,11 @@ function resolveOutboundMission(m: MissionRow, now: number): void {
   if (m.mission_type === 'spy') {
     const atkRes = getUserResearch(m.user_id);
     const defRes = getUserResearch(targetRow.user_id);
-    const scoutsSent = Math.max(1, units.scout_car || 0);
+    const reconUnits = (Object.entries(units) as [UnitId, number][]).reduce(
+      (sum, [uId, cnt]) => sum + (UNITS[uId]?.specialRole === 'recon' ? cnt : 0),
+      0
+    );
+    const scoutsSent = Math.max(1, reconUnits);
     const radarBonus = targetState.buildings.radar_station || 0;
     const intelDiff =
       atkRes.radio_intel + Math.floor(Math.log2(scoutsSent + 1)) - (defRes.radio_intel + Math.floor(radarBonus / 2));

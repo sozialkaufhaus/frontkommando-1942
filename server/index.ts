@@ -743,7 +743,8 @@ app.post('/api/bases/:baseId/produce', authMiddleware, (req: AuthRequest, res) =
   const unitDurationSec = getUnitDurationSec(
     entityId,
     base.buildings.tank_works,
-    base.buildings.airfield
+    base.buildings.airfield,
+    base.buildings.shipyard
   );
 
   // Compute start time after existing queue tail
@@ -1103,8 +1104,14 @@ app.post('/api/missions', authMiddleware, (req: AuthRequest, res) => {
     return;
   }
 
-  if (missionType === 'spy' && !(unitsToSend.scout_car && unitsToSend.scout_car > 0)) {
-    res.status(400).json({ error: 'Für Aufklärung muss mindestens ein Spähwagen mitgeführt werden.' });
+  const hasRecon = (Object.entries(unitsToSend) as [UnitId, number][]).some(
+    ([uId, cnt]) => cnt > 0 && UNITS[uId]?.specialRole === 'recon'
+  );
+  if (missionType === 'spy' && !hasRecon) {
+    res.status(400).json({
+      error:
+        'Für Aufklärung muss mindestens eine Aufklärungseinheit mitgeführt werden (z. B. Spähpanzer, Fernspähtrupp oder Aufklärungsflugzeug).',
+    });
     return;
   }
 

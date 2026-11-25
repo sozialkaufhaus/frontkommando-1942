@@ -30,6 +30,7 @@ function expandArmy(
   const list: CombatEntityInstance[] = [];
   const atkMult = 1 + weaponsTech * 0.1;
   const armMult = 1 + armorTech * 0.1;
+  const hasCarrier = (counts.carrier || 0) > 0;
 
   for (const [id, rawCount] of Object.entries(counts) as [CombatEntityId, number][]) {
     const count = Math.floor(rawCount || 0);
@@ -37,7 +38,9 @@ function expandArmy(
     const stats = getCombatEntityStats(id);
     const maxHull = Math.round(stats.structure * armMult);
     const maxShield = Math.round(stats.shield * armMult);
-    const attack = Math.round(stats.attack * atkMult);
+    const isAir = id in UNITS && UNITS[id as UnitId].category === 'air';
+    const carrierBonus = hasCarrier && isAir ? 1.15 : 1;
+    const attack = Math.round(stats.attack * atkMult * carrierBonus);
     for (let i = 0; i < count; i++) {
       list.push({
         type: id,
@@ -65,7 +68,8 @@ function summarizeArmy(list: CombatEntityInstance[]): Partial<Record<CombatEntit
 
 function fireSide(
   shooters: CombatEntityInstance[],
-  targets: CombatEntityInstance[]
+  targets: CombatEntityInstance[],
+  defenseDampen = 1
 ): { shots: number; damage: number; absorbed: number } {
   if (targets.length === 0) return { shots: 0, damage: 0, absorbed: 0 };
 
@@ -84,7 +88,9 @@ function fireSide(
       totalShots++;
 
       const target = targets[Math.floor(Math.random() * targets.length)];
-      const dmg = shooter.attack;
+      const dmg = shooterStats.isDefense
+        ? Math.round(shooter.attack * defenseDampen)
+        : shooter.attack;
       totalDamage += dmg;
 
       if (!target.destroyed) {
@@ -240,6 +246,10 @@ export function simulateCombat(params: SimulateCombatParams): SimulateCombatResu
 
   const rounds: CombatRoundReport[] = [];
 
+  const hasMinesweeper = (params.attackerUnits.minesweeper_tank || 0) > 0;
+  const hasMedic = (params.attackerUnits.medic_team || 0) > 0;
+  const hasRepair = (params.attackerUnits.recovery_team || 0) > 0;
+
   for (let round = 1; round <= 6; round++) {
     if (attackers.length === 0 || defenders.length === 0) break;
 
@@ -247,8 +257,9 @@ export function simulateCombat(params: SimulateCombatParams): SimulateCombatResu
     for (const a of attackers) a.shield = a.maxShield;
     for (const d of defenders) d.shield = d.maxShield;
 
-    const atkFire = fireSide(attackers, defenders);
-    const defFire = fireSide(defenders, attackers);
+    const atkFire = fireSide(attackers, defenders, 1);
+    const defDampen = round === 1 && hasMinesweeper ? 0.65 : 1;
+    const defFire = fireSide(defenders, attackers, defDampen);
 
     attackers = attackers.filter((e) => !e.destroyed);
     defenders = defenders.filter((e) => !e.destroyed);
@@ -278,13 +289,39 @@ export function simulateCombat(params: SimulateCombatParams): SimulateCombatResu
     outcome = 'draw';
   }
 
-  // Surviving attacker units & cargo capacity
+  // Surviving attacker units & cargo capacity (plus medic / repair recovery)
   const attackerSurvivingUnits: Partial<Record<UnitId, number>> = {};
   let survivingCargo = 0;
   for (const [id, count] of Object.entries(atkRem) as [CombatEntityId, number][]) {
     if (id in UNITS && count > 0) {
       attackerSurvivingUnits[id as UnitId] = count;
-      survivingCargo += UNITS[id as UnitId].cargo * count;
+    }
+  }
+
+  if (attackers.length > 0 && (hasMedic || hasRepair)) {
+    for (const [id, initCount] of Object.entries(params.attackerUnits) as [UnitId, number][]) {
+      const survived = attackerSurvivingUnits[id] || 0;
+      const lost = Math.max(0, (initCount || 0) - survived);
+      if (lost <= 0) continue;
+      const cat = UNITS[id].category;
+      const rate =
+        hasMedic && (cat === 'infantry' || cat === 'support')
+          ? 0.2
+          : hasRepair && (cat === 'armor' || cat === 'artillery')
+            ? 0.18
+            : 0;
+      if (rate > 0) {
+        const recovered = Math.floor(lost * rate);
+        if (recovered > 0) {
+          attackerSurvivingUnits[id] = survived + recovered;
+        }
+      }
+    }
+  }
+
+  for (const [id, count] of Object.entries(attackerSurvivingUnits) as [UnitId, number][]) {
+    if (count > 0) {
+      survivingCargo += UNITS[id].cargo * count;
     }
   }
 
